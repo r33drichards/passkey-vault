@@ -1,0 +1,5 @@
+# Generate independent values; never commit .dev.vars.
+# VAULT_KEY: openssl rand -base64 32
+# SETUP_KEY: openssl rand -hex 32
+VAULT_KEY="REPLACE_WITH_BASE64_32_BYTE_KEY"
+SETUP_KEY="REPLACE_WITH_RANDOM_SETUP_KEY"

@@ -1,0 +1,31 @@
+{
+  "name": "passkey-vault",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "npm run build && wrangler dev --var APP_ORIGIN:http://localhost:8787",
+    "deploy": "npm run build && wrangler deploy",
+    "check": "tsc --noEmit && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@simplewebauthn/browser": "13.3.0",
+    "@simplewebauthn/server": "13.3.3",
+    "jsqr": "1.4.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@cloudflare/workers-types": "5.20261003.1",
+    "esbuild": "0.28.2",
+    "qrcode": "1.5.4",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11",
+    "wrangler": "4.147.0"
+  },
+  "overrides": {
+    "undici": "^7.29.1",
+    "sharp": "^0.35.4"
+  }
+}
