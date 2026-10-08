@@ -1,3 +1,4 @@
+import { parsePassword, parseBitwarden, type PasswordEntry } from './passwords';
 import { DurableObject } from 'cloudflare:workers';
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse, type WebAuthnCredential, type RegistrationResponseJSON, type AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { randomToken, hash, equalSecret, encrypt, decrypt, b64, unb64 } from './crypto';
@@ -43,12 +44,12 @@ export class Vault extends DurableObject<Env> {
       catch (e) { return json({error: e instanceof HTTPError ? e.message : 'Unable to complete request'}, e instanceof HTTPError ? e.status : 500); }
     });
   }
-  async body(req: Request): Promise<Record<string,unknown>> {
+  async body(req: Request, limit=16384): Promise<Record<string,unknown>> {
     if (!req.headers.get('content-type')?.startsWith('application/json')) throw new HTTPError(415,'Expected JSON');
-    if (Number(req.headers.get('content-length')) > 16384) throw new HTTPError(413,'Request too large');
+    if (Number(req.headers.get('content-length')) > limit) throw new HTTPError(413,'Request too large');
     const reader = req.body?.getReader(); if (!reader) throw new HTTPError(400,'Expected JSON object');
     const parts: Uint8Array[] = []; let size=0;
-    while (true) { const {value,done}=await reader.read(); if (done) break; size+=value.byteLength; if(size>16384){await reader.cancel();throw new HTTPError(413,'Request too large');} parts.push(value); }
+    while (true) { const {value,done}=await reader.read(); if (done) break; size+=value.byteLength; if(size>limit){await reader.cancel();throw new HTTPError(413,'Request too large');} parts.push(value); }
     const bytes = new Uint8Array(size); let offset=0; for(const p of parts){bytes.set(p,offset);offset+=p.length;}
     try { const data=JSON.parse(new TextDecoder().decode(bytes)); if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error(); return data; }
     catch { throw new HTTPError(400,'Expected JSON object'); }
@@ -95,10 +96,39 @@ export class Vault extends DurableObject<Env> {
       const accounts=await Promise.all([...entries].map(async ([id,cipher])=>{const a=await decrypt<Account>(cipher,this.env.VAULT_KEY,id);return {id:id.slice(8),issuer:a.issuer,label:a.label,digits:a.digits,period:a.period,code:await totp(a,now)};}));
       return json({accounts,now});
     }
+    if(req.method==='GET' && path==='/api/passwords') {
+      await this.session(req);const entries=await this.ctx.storage.list<string>({prefix:'password:'});
+      return json({entries:await Promise.all([...entries].map(async([key,cipher])=>{const {name,username,urls}=await decrypt<PasswordEntry>(cipher,this.env.VAULT_KEY,key);return {id:key.slice(9),name,username,urls};}))});
+    }
     if(req.method==='GET' && path==='/api/passkeys') {await this.session(req);const credentials=await this.ctx.storage.get<Credential[]>('credentials')||[];return json({passkeys:credentials.map(c=>({id:c.id,name:c.name,created:c.created}))});}
     if(req.method==='GET' && path==='/api/ssh-keys') {await this.session(req);return json({keys:await this.ctx.storage.get<SSHKey[]>('sshKeys')||[]});}
     if(req.method!=='POST') throw new HTTPError(404,'Not found');
-    const body=await this.body(req);
+    if(path.startsWith('/api/passwords/'))await this.session(req,true);
+    const body=await this.body(req,path==='/api/passwords/import'?2*1024*1024:path==='/api/passwords/save'?65536:16384);
+    if(path.startsWith('/api/passwords/')) {
+      const validId=typeof body.id==='string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(body.id);
+      const key='password:'+body.id;
+      if(path==='/api/passwords/read' || path==='/api/passwords/delete'){
+        if(!validId)throw new HTTPError(400,'Invalid login');const cipher=await this.ctx.storage.get<string>(key);if(!cipher)throw new HTTPError(404,'Login not found');
+        if(path.endsWith('/read'))return json({entry:{id:body.id,...await decrypt<PasswordEntry>(cipher,this.env.VAULT_KEY,key)}});
+        await this.ctx.storage.delete(key);return json({ok:true});
+      }
+      if(path==='/api/passwords/save'){
+        if(body.id!==undefined && !validId)throw new HTTPError(400,'Invalid login');
+        if(validId && !await this.ctx.storage.get(key))throw new HTTPError(404,'Login not found');
+        if(!validId && (await this.ctx.storage.list({prefix:'password:'})).size>=500)throw new HTTPError(400,'Maximum 500 logins');
+        let entry;try{entry=parsePassword(body);}catch(e){throw new HTTPError(400,(e as Error).message);}
+        const id=validId?body.id as string:crypto.randomUUID(), storageId='password:'+id;
+        await this.ctx.storage.put(storageId,await encrypt(entry,this.env.VAULT_KEY,storageId));return json({id});
+      }
+      if(path==='/api/passwords/import'){
+        let parsed;try{parsed=parseBitwarden(body.export);}catch(e){throw new HTTPError(400,(e as Error).message);}
+        if((await this.ctx.storage.list({prefix:'password:'})).size+parsed.entries.length>500)throw new HTTPError(400,'Import would exceed 500 logins');
+        const records:Record<string,string>={};for(const entry of parsed.entries){const id='password:'+crypto.randomUUID();records[id]=await encrypt(entry,this.env.VAULT_KEY,id);}
+        await this.ctx.storage.transaction(async txn=>{const pairs=Object.entries(records);for(let i=0;i<pairs.length;i+=100)await txn.put(Object.fromEntries(pairs.slice(i,i+100)));});
+        return json({imported:parsed.entries.length,skipped:parsed.skipped,omitted:parsed.omitted});
+      }
+    }
     if(path.startsWith('/api/auth/') || path.startsWith('/api/setup/') || path.startsWith('/api/recovery/')) await this.rate(req);
     const rpID=new URL(this.env.APP_ORIGIN).hostname;
     if(path==='/api/ssh-keys/add') {
@@ -175,7 +205,7 @@ export class Vault extends DurableObject<Env> {
       // Revoking a passkey also revokes all sessions, including the current one.
       const sessions=await this.ctx.storage.list({prefix:'session:'});await this.ctx.storage.delete([...sessions.keys()]);return json({ok:true},200,{'Set-Cookie':cookieHeader(req,'vault_session','',0)});
     }
-    if(path==='/api/export') {await this.session(req,true);const entries=await this.ctx.storage.list<string>({prefix:'account:'});const accounts=await Promise.all([...entries].map(async([id,cipher])=>toURI(await decrypt<Account>(cipher,this.env.VAULT_KEY,id))));return json({version:1,accounts});}
+    if(path==='/api/export') {await this.session(req,true);const entries=await this.ctx.storage.list<string>({prefix:'account:'});const accounts=await Promise.all([...entries].map(async([id,cipher])=>toURI(await decrypt<Account>(cipher,this.env.VAULT_KEY,id))));const passwords=await this.ctx.storage.list<string>({prefix:'password:'});return json({version:1,accounts,passwords:await Promise.all([...passwords].map(([id,cipher])=>decrypt<PasswordEntry>(cipher,this.env.VAULT_KEY,id)))});}
     throw new HTTPError(404,'Not found');
   }
   async newSession(req: Request): Promise<Response> {

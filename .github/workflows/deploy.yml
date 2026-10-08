@@ -1,0 +1,40 @@
+name: Deploy to Cloudflare
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --legacy-peer-deps
+      - run: npm run check
+      - run: npm run build
+      - run: npm test
+      - name: Deploy Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          APP_ORIGIN: ${{ vars.APP_ORIGIN }}
+          WRANGLER_SEND_METRICS: 'false'
+        run: |
+          : "${CLOUDFLARE_API_TOKEN:?Set the CLOUDFLARE_API_TOKEN repository secret}"
+          : "${CLOUDFLARE_ACCOUNT_ID:?Set the CLOUDFLARE_ACCOUNT_ID repository variable}"
+          : "${APP_ORIGIN:?Set the APP_ORIGIN repository variable}"
+          node --input-type=module -e 'const value=process.env.APP_ORIGIN; const url=new URL(value); if(url.protocol!=="https:" || url.origin!==value) throw new Error("APP_ORIGIN must be an HTTPS origin without a trailing slash");'
+          npx --no-install wrangler deploy --var "APP_ORIGIN:$APP_ORIGIN"

@@ -55,3 +55,56 @@ describe('SSH recovery lifecycle',()=>{
   });
   it('rejects signatures for another namespace and revoked keys',async()=>{const key=await ephemeralSSH(),session=await seed();await req('ssh-keys/add',{publicKey:key.publicKey},session);const options=await req('recovery/options',{publicKey:key.publicKey});const {challenge}=await options.json() as any;const cookie=options.headers.get('set-cookie')!.split(';')[0];expect((await req('recovery/verify',{signature:await key.sign(challenge,'other-service')},cookie)).status).toBe(403);const parsed=await parseSSHKey(key.publicKey);await req('ssh-keys/delete',{id:parsed.id},session);expect((await req('recovery/options',{publicKey:key.publicKey})).status).toBe(403);});
 });
+
+describe('Password manager and Bitwarden import',()=>{
+  const login={name:'Example',username:'me@example.com',password:'private-password',urls:['https://example.com'],notes:'private note'};
+  const exported=(items:unknown[])=>({encrypted:false,items});
+  const item={type:1,name:login.name,notes:login.notes,login:{username:login.username,password:login.password,uris:login.urls.map(uri=>({uri}))}};
+  it('protects passwords with auth and origin checks',async()=>{
+    expect((await req('passwords')).status).toBe(401);
+    for(const path of ['save','read','delete','import'])expect((await req('passwords/'+path,{})).status).toBe(401);
+    const cookie=await seed();expect((await req('passwords/save',login,cookie,'https://evil.example')).status).toBe(403);
+  });
+  it('encrypts logins, excludes secrets from lists, and supports editing, export and deletion',async()=>{
+    const cookie=await seed();const saved=await req('passwords/save',login,cookie);expect(saved.status).toBe(200);const {id}=await saved.json() as any;
+    const stored=await runInDurableObject(stub(),(_,ctx)=>ctx.storage.get('password:'+id));expect(String(stored)).not.toContain(login.password);expect(String(stored)).not.toContain(login.name);
+    const listed=await (await req('passwords',undefined,cookie)).json() as any;expect(listed.entries).toEqual([{id,name:login.name,username:login.username,urls:login.urls}]);
+    expect(await (await req('passwords/read',{id},cookie)).json()).toEqual({entry:{id,...login}});
+    expect((await req('passwords/save',{id,...login,password:'updated'},cookie)).status).toBe(200);
+    const backup=await (await req('export',{},cookie)).json() as any;expect(backup.accounts).toEqual([]);expect(backup.passwords).toEqual([{...login,password:'updated'}]);
+    expect((await req('passwords/delete',{id},cookie)).status).toBe(200);expect((await req('passwords/read',{id},cookie)).status).toBe(404);
+  });
+  it('requires recent verification to read, write, delete, import or export secrets',async()=>{
+    const cookie=await seed();const {id}=await (await req('passwords/save',login,cookie)).json() as any;
+    await runInDurableObject(stub(),async(_,ctx)=>ctx.storage.put('session:'+await hash('test-session'),{verified:Date.now()-180000,expires:Date.now()+900000}));
+    expect((await req('passwords',undefined,cookie)).status).toBe(200);
+    for(const path of ['read','save','delete','import'])expect((await req('passwords/'+path,{id,...login,export:exported([item])},cookie)).status).toBe(428);
+    expect((await req('export',{},cookie)).status).toBe(428);
+  });
+  it('imports supported login fields and reports unsupported items and omitted fields',async()=>{
+    const cookie=await seed();const res=await req('passwords/import',{export:exported([{...item,fields:[{name:'custom',value:'not imported'}],login:{...item.login,totp:'JBSWY3DPEHPK3PXP'}},{type:2,name:'Note'}])},cookie);
+    expect(res.status).toBe(200);expect(await res.json()).toEqual({imported:1,skipped:1,omitted:1});
+    const {entries}=await (await req('passwords',undefined,cookie)).json() as any;expect(entries).toHaveLength(1);
+    expect(await (await req('passwords/read',{id:entries[0].id},cookie)).json()).toEqual({entry:{id:entries[0].id,...login}});
+  });
+  it('rejects malformed and encrypted imports without partially writing logins',async()=>{
+    const cookie=await seed();
+    for(const value of [{encrypted:true,items:[item]},exported([item,{...item,name:''}]),{items:'invalid'},exported([{...item,login:{uris:'invalid'}}])]){
+      expect((await req('passwords/import',{export:value},cookie)).status).toBe(400);
+      expect(await (await req('passwords',undefined,cookie)).json()).toEqual({entries:[]});
+    }
+    expect((await req('passwords/save',{...login,password:5},cookie)).status).toBe(400);
+    expect((await req('passwords/save',{...login,id:'../accounts'},cookie)).status).toBe(400);
+  });
+  it('accepts imports larger than the normal request limit and rejects oversized requests',async()=>{
+    const cookie=await seed();const items=Array.from({length:20},(_,i)=>({...item,name:'Login '+i,notes:'n'.repeat(2000)}));
+    expect((await req('passwords/import',{export:exported(items)},cookie)).status).toBe(200);
+    expect((await req('passwords/import',{export:{items:[],padding:'x'.repeat(2*1024*1024)}},cookie)).status).toBe(413);
+    expect((await req('passwords',undefined,cookie)).status).toBe(200);
+  });
+  it('enforces the total capacity without partially importing',async()=>{
+    const cookie=await seed();await runInDurableObject(stub(),async(_,ctx)=>{for(let i=0;i<5;i++){const entries:Record<string,string>={};for(let j=0;j<100;j++)entries['password:seed-'+(i*100+j)]=await encrypt(login,env.VAULT_KEY,'password:seed-'+(i*100+j));await ctx.storage.put(entries);}});
+    expect((await req('passwords/save',login,cookie)).status).toBe(400);
+    expect((await req('passwords/import',{export:exported([item])},cookie)).status).toBe(400);
+  });
+});
