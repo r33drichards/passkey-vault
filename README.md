@@ -122,3 +122,17 @@ The vault also stores login names, usernames, passwords, URLs, and notes. Use **
 Choose **Import Bitwarden** and select an **unencrypted JSON** export made by Bitwarden. Preview the login count and names, then confirm import. Names, usernames, passwords, URLs, and notes are retained; cards, identities, and secure notes are skipped. Folders, collections, custom fields, attachments, password history, saved passkeys, URI match rules, and TOTP seeds are not imported. Import reports entries containing omitted extra fields. Import validation completes before any records are written, and the encrypted records are committed in one storage transaction. Limits: 500 stored logins, 500 logins per import, 2000 source items, and a file smaller than 1.9 MB in the UI. Repeating an import adds duplicates; it does not merge or overwrite existing entries. Encrypted JSON and CSV exports are unsupported.
 
 The offline export now includes password entries as well as TOTP setup links. Both the Bitwarden source file and the vault export contain plaintext secrets; keep them in encrypted storage and remove temporary copies after use. Password records use AES-256-GCM with their storage IDs as associated data, under the existing `VAULT_KEY`. This uses the same server-held key model as TOTP storage: it is not end-to-end encryption, and control of the Worker or its secrets permits decryption. No browser extension or autofill is included.
+
+## Automatic deployment with GitHub Actions
+
+The deployment workflow runs type checks, the build, and tests, then deploys to Cloudflare on every push to `main`. You can also run **Deploy to Cloudflare** manually from GitHub's Actions tab on `main`.
+
+In GitHub **Settings → Secrets and variables → Actions**, configure:
+
+- Repository secret `CLOUDFLARE_API_TOKEN`: a Cloudflare API token using the **Edit Cloudflare Workers** template, scoped to your account.
+- Repository variable `CLOUDFLARE_ACCOUNT_ID`: your Cloudflare account ID.
+- Repository variable `APP_ORIGIN`: your permanent HTTPS origin, without a trailing slash, such as `https://passkey-vault.YOUR-SUBDOMAIN.workers.dev`.
+
+The workflow passes `APP_ORIGIN` to Wrangler, overriding the local default without editing `wrangler.jsonc`. Choose the permanent hostname before registering production passkeys. For a custom domain, configure its routing in Cloudflare separately.
+
+Configure `VAULT_KEY` and `SETUP_KEY` directly as Worker secrets using the deployment instructions above. They are not GitHub Actions secrets, and deployments preserve their existing values. For a first deployment, add those secrets before registering your passkey; the API returns 503 until they are configured. Keep the production vault key stable and backed up.
