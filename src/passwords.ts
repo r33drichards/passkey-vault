@@ -10,7 +10,7 @@ export function parsePassword(value:unknown):PasswordEntry {
   if(!name)throw new Error('Name this login');
   const urls=v.urls??[];
   if(!Array.isArray(urls)||urls.length>20)throw new Error('Maximum 20 URLs per login');
-  return {name,username:text(v.username,'username',1000),password:text(v.password,'password',4000),notes:text(v.notes,'notes',8000),urls:urls.map(u=>text(u,'URL',2000))};
+  return {name,username:text(v.username,'username',1000),password:text(v.password,'password',4000),notes:text(v.notes,'notes',8000),urls:urls.map(u=>text(u,'URL',8192))};
 }
 export function parseBitwarden(value:unknown):{entries:PasswordEntry[]; skipped:number; omitted:number} {
   if(!value || typeof value!=='object' || Array.isArray(value))throw new Error('Choose an unencrypted Bitwarden JSON export');
