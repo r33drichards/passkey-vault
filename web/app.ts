@@ -105,7 +105,29 @@ el<HTMLFormElement>('password-form').addEventListener('submit',e=>{e.preventDefa
 el('bitwarden-import').addEventListener('click',()=>dialog('import-dialog').showModal());
 dialog('import-dialog').addEventListener('close',clearImport);
 let importRevision=0;
-el<HTMLInputElement>('import-file').addEventListener('change',async()=>{const revision=++importRevision,current=epoch;importExport=undefined;el<HTMLButtonElement>('import-submit').disabled=true;try{const file=el<HTMLInputElement>('import-file').files?.[0];if(!file)return;if(file.size>1900000)throw new Error('Export must be smaller than 1.9 MB');const value=JSON.parse(await file.text());if(revision!==importRevision || current!==epoch || !dialog('import-dialog').open)return;const parsed=parseBitwarden(value);importExport=value;el('import-preview').textContent=`${parsed.entries.length} logins to import; ${parsed.skipped} unsupported items skipped; ${parsed.omitted} logins have additional fields that will be omitted.\nLogins: ${parsed.entries.slice(0,10).map(e=>e.name).join(", ")}${parsed.entries.length>10?" …":""}`;el<HTMLButtonElement>('import-submit').disabled=!parsed.entries.length;}catch(e){if(revision===importRevision && current===epoch && dialog('import-dialog').open)el('import-preview').textContent=(e as Error).message;}});
-el<HTMLFormElement>('import-form').addEventListener('submit',e=>{e.preventDefault();action(el<HTMLButtonElement>('import-submit'),async()=>{if(!importExport)throw new Error('Choose an export first');const value=importExport;const result=await recent(()=>api('passwords/import',{export:value})) as any;dialog('import-dialog').close();await refreshPasswords();toast(`Imported ${result.imported} logins; skipped ${result.skipped} items`);});});
+async function previewImport(read:()=>Promise<string>){
+  const revision=++importRevision,current=epoch;
+  importExport=undefined;el('import-preview').textContent='';el<HTMLButtonElement>('import-submit').disabled=true;
+  try{
+    const text=await read();
+    if(revision!==importRevision || current!==epoch || !dialog('import-dialog').open)return;
+    if(!text.trim())return;
+    if(new TextEncoder().encode(text).length>1900000)throw new Error('Export must be smaller than 1.9 MB');
+    let value:unknown;try{value=JSON.parse(text);}catch{throw new Error('Paste or choose a valid Bitwarden JSON export');}
+    const parsed=parseBitwarden(value);importExport=value;
+    el('import-preview').textContent=`${parsed.entries.length} logins to import; ${parsed.skipped} unsupported items skipped; ${parsed.omitted} logins have additional fields that will be omitted.\nLogins: ${parsed.entries.slice(0,10).map(e=>e.name).join(", ")}${parsed.entries.length>10?" …":""}`;
+    el<HTMLButtonElement>('import-submit').disabled=!parsed.entries.length;
+  }catch(e){if(revision===importRevision && current===epoch && dialog('import-dialog').open)el('import-preview').textContent=(e as Error).message;}
+}
+el<HTMLInputElement>('import-file').addEventListener('change',()=>{
+  el<HTMLTextAreaElement>('import-json').value='';
+  const file=el<HTMLInputElement>('import-file').files?.[0];
+  void previewImport(async()=>{if(!file)return '';if(file.size>1900000)throw new Error('Export must be smaller than 1.9 MB');return file.text();});
+});
+el<HTMLTextAreaElement>('import-json').addEventListener('input',()=>{
+  el<HTMLInputElement>('import-file').value='';
+  const text=input('import-json');void previewImport(async()=>text);
+});
+el<HTMLFormElement>('import-form').addEventListener('submit',e=>{e.preventDefault();action(el<HTMLButtonElement>('import-submit'),async()=>{if(!importExport)throw new Error('Choose a file or paste an export first');const value=importExport;const result=await recent(()=>api('passwords/import',{export:value})) as any;dialog('import-dialog').close();await refreshPasswords();toast(`Imported ${result.imported} logins; skipped ${result.skipped} items`);});});
 
 void init();

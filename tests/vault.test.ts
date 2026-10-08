@@ -87,6 +87,24 @@ describe('Password manager and Bitwarden import',()=>{
     const {entries}=await (await req('passwords',undefined,cookie)).json() as any;expect(entries).toHaveLength(1);
     expect(await (await req('passwords/read',{id:entries[0].id},cookie)).json()).toEqual({entry:{id:entries[0].id,...login}});
   });
+  it('preserves long Bitwarden URLs through import, read and export',async()=>{
+    const cookie=await seed();const uri='https://example.com/?redirect='+ 'x'.repeat(3000);
+    const res=await req('passwords/import',{export:exported([{...item,login:{...item.login,uris:[{uri}]}}])},cookie);
+    expect(res.status).toBe(200);
+    const {entries}=await (await req('passwords',undefined,cookie)).json() as any;
+    expect(entries[0].urls).toEqual([uri]);
+    const {entry}=await (await req('passwords/read',{id:entries[0].id},cookie)).json() as any;
+    expect(entry.urls).toEqual([uri]);
+    const backup=await (await req('export',{},cookie)).json() as any;
+    expect(backup.passwords[0].urls).toEqual([uri]);
+  });
+  it('retains a bounded URL limit and rejects an oversized import atomically',async()=>{
+    const cookie=await seed();
+    expect((await req('passwords/save',{...login,urls:['x'.repeat(8192)]},cookie)).status).toBe(200);
+    const res=await req('passwords/import',{export:exported([item,{...item,login:{...item.login,uris:[{uri:'x'.repeat(8193)}]}}])},cookie);
+    expect(res.status).toBe(400);
+    expect((await (await req('passwords',undefined,cookie)).json() as any).entries).toHaveLength(1);
+  });
   it('rejects malformed and encrypted imports without partially writing logins',async()=>{
     const cookie=await seed();
     for(const value of [{encrypted:true,items:[item]},exported([item,{...item,name:''}]),{items:'invalid'},exported([{...item,login:{uris:'invalid'}}])]){
