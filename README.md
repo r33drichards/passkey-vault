@@ -136,3 +136,7 @@ In GitHub **Settings → Secrets and variables → Actions**, configure:
 The workflow passes `APP_ORIGIN` to Wrangler, overriding the local default without editing `wrangler.jsonc`. Choose the permanent hostname before registering production passkeys. For a custom domain, configure its routing in Cloudflare separately.
 
 Configure `VAULT_KEY` and `SETUP_KEY` directly as Worker secrets using the deployment instructions above. They are not GitHub Actions secrets, and deployments preserve their existing values. For a first deployment, add those secrets before registering your passkey; the API returns 503 until they are configured. Keep the production vault key stable and backed up.
+
+### SSH confirmation for sensitive actions
+
+Password save, reveal, import, deletion, key management, and export retain the two-minute recent-authentication requirement. When confirmation is needed, choose a passkey or a registered SSH key. SSH confirmation uses a one-time, five-minute challenge bound to the current session and origin; it refreshes verification without extending the 15-minute session or revoking other sessions. Download and sign locally with the displayed ssh-keygen command. Never upload a private key. Cancelling leaves an open password form intact. The existing SSH recovery unlock flow continues to revoke existing sessions.

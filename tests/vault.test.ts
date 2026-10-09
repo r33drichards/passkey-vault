@@ -126,3 +126,28 @@ describe('Password manager and Bitwarden import',()=>{
     expect((await req('passwords/import',{export:exported([item])},cookie)).status).toBe(400);
   });
 });
+
+
+describe('SSH sensitive-action confirmation',()=>{
+  async function start(){const key=await ephemeralSSH(),cookie=await seed();await req('ssh-keys/add',{publicKey:key.publicKey},cookie);await runInDurableObject(stub(),async(_,ctx)=>ctx.storage.put('session:'+await hash('test-session'),{verified:Date.now()-180000,expires:Date.now()+900000}));const options=await req('auth/ssh/options',{publicKey:key.publicKey},cookie);expect(options.status).toBe(200);const {challenge}=await options.json() as any;return {key,cookie,challenge,challengeCookie:options.headers.get('set-cookie')!.split(';')[0]};}
+  it('refreshes recent auth for passwords without extending or replacing the session',async()=>{
+    const {key,cookie,challenge,challengeCookie}=await start();const before=await runInDurableObject(stub(),async(_,ctx)=>ctx.storage.get<any>('session:'+await hash('test-session')));
+    const login={name:'SSH test',password:'test-secret',urls:[]};expect((await req('passwords/save',login,cookie)).status).toBe(428);
+    expect(challenge).toContain('Confirm sensitive action');expect(challenge).toContain(origin);
+    const signature=await key.sign(challenge),combined=cookie+'; '+challengeCookie;
+    const verified=await req('auth/ssh/verify',{signature},combined);expect(verified.status).toBe(200);expect(verified.headers.get('set-cookie')).toBeNull();
+    const after=await runInDurableObject(stub(),async(_,ctx)=>ctx.storage.get<any>('session:'+await hash('test-session')));expect(after.expires).toBe(before.expires);expect(after.verified).toBeGreaterThan(before.verified);
+    const saved=await req('passwords/save',login,cookie);expect(saved.status).toBe(200);const {id}=await saved.json() as any;expect((await req('passwords/read',{id},cookie)).status).toBe(200);
+    expect((await req('auth/ssh/verify',{signature},combined)).status).toBe(400);
+  });
+  it('requires a live session and registered key',async()=>{const key=await ephemeralSSH();expect((await req('auth/ssh/options',{publicKey:key.publicKey})).status).toBe(401);const cookie=await seed();expect((await req('auth/ssh/options',{publicKey:key.publicKey},cookie)).status).toBe(403);});
+  it('rejects changed sessions, invalid signatures and revoked keys',async()=>{
+    let flow=await start();await runInDurableObject(stub(),async(_,ctx)=>ctx.storage.put('session:'+await hash('other'),{verified:0,expires:Date.now()+900000}));expect((await req('auth/ssh/verify',{signature:await flow.key.sign(flow.challenge)},'vault_session=other; '+flow.challengeCookie)).status).toBe(403);
+    flow=await start();expect((await req('auth/ssh/verify',{signature:await flow.key.sign(flow.challenge,'wrong')},flow.cookie+'; '+flow.challengeCookie)).status).toBe(403);
+    flow=await start();await runInDurableObject(stub(),async(_,ctx)=>ctx.storage.put('sshKeys',[]));expect((await req('auth/ssh/verify',{signature:await flow.key.sign(flow.challenge)},flow.cookie+'; '+flow.challengeCookie)).status).toBe(403);
+  });
+  it('rejects expiry and recovery challenges used for confirmation',async()=>{
+    const flow=await start();await runInDurableObject(stub(),async(_,ctx)=>ctx.storage.put('challenge:'+await hash('expired-confirm'),{kind:'ssh-confirm',challenge:flow.challenge,session:await hash('test-session'),expires:Date.now()-1}));expect((await req('auth/ssh/verify',{signature:await flow.key.sign(flow.challenge)},flow.cookie+'; vault_challenge=expired-confirm')).status).toBe(400);
+    const recovery=await req('recovery/options',{publicKey:flow.key.publicKey});const {challenge}=await recovery.json() as any;expect((await req('auth/ssh/verify',{signature:await flow.key.sign(challenge)},flow.cookie+'; '+recovery.headers.get('set-cookie')!.split(';')[0])).status).toBe(400);
+  });
+});
