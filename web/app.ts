@@ -47,7 +47,7 @@ function tick(){if(!signedIn||document.hidden)return;const now=Date.now()+server
   if(accounts.some(a=>!isCurrent(a)))stale=true;if(stale&&!refreshing)refresh().catch(e=>toast(e.message,true));
 }
 function confirmRemoval(title:string,message:string):Promise<boolean>{el('confirm-title').textContent=title;el('confirm-text').textContent=message;const d=dialog('confirm-dialog');d.returnValue='';d.showModal();return new Promise(resolve=>d.addEventListener('close',()=>resolve(d.returnValue==='yes'),{once:true}));}
-async function recent(fn:()=>Promise<unknown>){try{return await fn();}catch(e){if(e instanceof ApiError && e.status===428){await login();return await fn();}throw e;}}
+async function recent(fn:()=>Promise<unknown>){try{return await fn();}catch(e){if(e instanceof ApiError && e.status===428){await confirmIdentity();return await fn();}throw e;}}
 async function loadPasskeys(){const {passkeys}=await api('passkeys');el('passkeys').replaceChildren();for(const p of passkeys){const row=node('div','key-row'),label=node('div','',p.name);label.append(node('small','',`Added ${new Date(p.created).toLocaleDateString()}`));row.append(label);if(passkeys.length>1){const remove=node('button','quiet','Remove') as HTMLButtonElement;remove.addEventListener('click',()=>action(remove,async()=>{if(!await confirmRemoval('Remove passkey?',`Remove ${p.name}? All signed-in sessions will also be locked.`))return;await recent(()=>api('passkeys/delete',{id:p.id}));showLocked(true);}));row.append(remove);}el('passkeys').append(row);}}
 el<HTMLButtonElement>('sign-in').addEventListener('click',e=>action(e.currentTarget as HTMLButtonElement,async()=>{if(!browserSupportsWebAuthn())throw new Error('This browser does not support passkeys');await login();await unlock();}));
 el<HTMLFormElement>('setup-form').addEventListener('submit',e=>{e.preventDefault();action(el('setup-form').querySelector('button')!,async()=>{const {options}=await api('setup/options',{setupKey:input('setup-key'),name:input('setup-name')});el<HTMLInputElement>('setup-key').value='';const response=await startRegistration({optionsJSON:options});await api('setup/verify',{response});await unlock();toast('Your vault is ready. Add a backup passkey in settings.');});});
@@ -61,16 +61,30 @@ el<HTMLFormElement>('account-form').addEventListener('submit',e=>{e.preventDefau
 el('search').addEventListener('input',()=>{render();renderPasswords();});
 el<HTMLButtonElement>('settings').addEventListener('click',e=>action(e.currentTarget as HTMLButtonElement,async()=>{await loadPasskeys();await loadSSHKeys();dialog('settings-dialog').showModal();}));
 el<HTMLFormElement>('passkey-form').addEventListener('submit',e=>{e.preventDefault();action(el('passkey-form').querySelector('button')!,async()=>{const {options}=await recent(()=>api('passkeys/options',{name:input('passkey-name')})) as any;const response=await startRegistration({optionsJSON:options});await api('passkeys/verify',{response});el<HTMLFormElement>('passkey-form').reset();await loadPasskeys();toast('Backup passkey added');});});
-el<HTMLButtonElement>('export').addEventListener('click',e=>action(e.currentTarget as HTMLButtonElement,async()=>{await login();const data=await api('export',{});const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='passkey-vault-backup.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Backup downloaded. Keep this file private.');}));
+el<HTMLButtonElement>('export').addEventListener('click',e=>action(e.currentTarget as HTMLButtonElement,async()=>{await confirmIdentity();const data=await api('export',{});const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='passkey-vault-backup.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Backup downloaded. Keep this file private.');}));
 let recoveryChallenge='';
+let sshConfirmation=false;
+let resolveSSH:((ok:boolean)=>void)|undefined;
+function chooseVerification():Promise<string>{const d=dialog('verify-dialog');d.returnValue='';d.showModal();return new Promise(resolve=>d.addEventListener('close',()=>resolve(d.returnValue),{once:true}));}
+el('verify-passkey').addEventListener('click',()=>dialog('verify-dialog').close('passkey'));
+el('verify-ssh').addEventListener('click',()=>dialog('verify-dialog').close('ssh'));
+async function confirmIdentity(){
+  const choice=await chooseVerification();
+  if(choice==='passkey'){await login();return;}
+  if(choice!=='ssh')throw new Error('Verification cancelled');
+  sshConfirmation=true;dialog('recovery-dialog').showModal();
+  const ok=await new Promise<boolean>(resolve=>{resolveSSH=resolve;});
+  if(!ok)throw new Error('Verification cancelled');
+}
+
 function download(text:string,name:string,type='text/plain'){const url=URL.createObjectURL(new Blob([text],{type}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 async function loadSSHKeys(){const {keys}=await api('ssh-keys');el('ssh-keys').replaceChildren();for(const key of keys){const row=node('div','key-row'),label=node('div','',key.name);label.append(node('small','fingerprint',key.id));const remove=node('button','quiet','Remove') as HTMLButtonElement;remove.addEventListener('click',()=>action(remove,async()=>{if(!await confirmRemoval('Remove recovery key?',`Remove ${key.name}? All sessions will be locked.`))return;await recent(()=>api('ssh-keys/delete',{id:key.id}));showLocked(true);}));row.append(label,remove);el('ssh-keys').append(row);}}
 el<HTMLFormElement>('ssh-form').addEventListener('submit',e=>{e.preventDefault();action(el('ssh-form').querySelector('button')!,async()=>{await recent(()=>api('ssh-keys/add',{publicKey:input('ssh-public'),name:input('ssh-name')}));el<HTMLFormElement>('ssh-form').reset();await loadSSHKeys();toast('SSH recovery key registered. Test it before relying on it.');});});
-el('recover').addEventListener('click',()=>dialog('recovery-dialog').showModal());
-dialog('recovery-dialog').addEventListener('close',()=>{recoveryChallenge='';el('recovery-sign').hidden=true;el<HTMLFormElement>('recovery-start').reset();el<HTMLFormElement>('recovery-finish').reset();});
-el<HTMLFormElement>('recovery-start').addEventListener('submit',e=>{e.preventDefault();action(el('recovery-start').querySelector('button')!,async()=>{const data=await api('recovery/options',{publicKey:input('recovery-public')});recoveryChallenge=data.challenge;el('recovery-sign').hidden=false;el<HTMLTextAreaElement>('recovery-signature').value='';});});
+el('recover').addEventListener('click',()=>{sshConfirmation=false;dialog('recovery-dialog').showModal();});
+dialog('recovery-dialog').addEventListener('close',()=>{resolveSSH?.(false);resolveSSH=undefined;sshConfirmation=false;recoveryChallenge='';el('recovery-sign').hidden=true;el<HTMLFormElement>('recovery-start').reset();el<HTMLFormElement>('recovery-finish').reset();});
+el<HTMLFormElement>('recovery-start').addEventListener('submit',e=>{e.preventDefault();action(el('recovery-start').querySelector('button')!,async()=>{const data=await api(sshConfirmation?'auth/ssh/options':'recovery/options',{publicKey:input('recovery-public')});recoveryChallenge=data.challenge;el('recovery-sign').hidden=false;el<HTMLTextAreaElement>('recovery-signature').value='';});});
 el('download-challenge').addEventListener('click',()=>download(recoveryChallenge,'challenge.txt'));
-el<HTMLFormElement>('recovery-finish').addEventListener('submit',e=>{e.preventDefault();action(el('recovery-finish').querySelector('button')!,async()=>{await api('recovery/verify',{signature:input('recovery-signature')});dialog('recovery-dialog').close();lastAction=Date.now();await unlock();toast('Recovered. You can now register a new passkey.');});});
+el<HTMLFormElement>('recovery-finish').addEventListener('submit',e=>{e.preventDefault();action(el('recovery-finish').querySelector('button')!,async()=>{await api(sshConfirmation?'auth/ssh/verify':'recovery/verify',{signature:input('recovery-signature')});const confirmed=sshConfirmation;if(confirmed){resolveSSH?.(true);resolveSSH=undefined;}dialog('recovery-dialog').close();lastAction=Date.now();if(!confirmed)await unlock();toast(confirmed?'Identity confirmed.':'Unlocked with SSH.');});});
 el('confirm-cancel').addEventListener('click',()=>dialog('confirm-dialog').close('no'));el('confirm-ok').addEventListener('click',()=>dialog('confirm-dialog').close('yes'));
 for(const event of ['pointerdown','keydown'])document.addEventListener(event,()=>{lastAction=Date.now();},{passive:true});
 setInterval(()=>{if(signedIn && Date.now()-lastAction>600000){void lock();return;}tick();},500);

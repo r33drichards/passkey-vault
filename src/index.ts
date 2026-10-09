@@ -6,7 +6,7 @@ import { parseSSHKey, verifySSHSignature, SSH_NAMESPACE, type SSHKey } from './s
 import { parseAccount, totp, toURI, type Account } from './totp';
 export interface Env { VAULT: DurableObjectNamespace<Vault>; ASSETS: Fetcher; APP_ORIGIN: string; VAULT_KEY: string; SETUP_KEY: string }
 type Credential = { id: string; publicKey: string; counter: number; transports?: WebAuthnCredential['transports']; name: string; created: number };
-type Challenge = { challenge: string; kind: 'setup'|'add'|'login'|'ssh'; expires: number; session?: string; name?: string; keyId?: string };
+type Challenge = { challenge: string; kind: 'setup'|'add'|'login'|'ssh'|'ssh-confirm'; expires: number; session?: string; name?: string; keyId?: string };
 type Session = { expires: number; verified: number };
 class HTTPError extends Error { constructor(public status: number, message: string) { super(message); } }
 function json(value: unknown, status=200, headers: Record<string,string> = {}) { return Response.json(value, {status, headers}); }
@@ -55,16 +55,16 @@ export class Vault extends DurableObject<Env> {
     catch { throw new HTTPError(400,'Expected JSON object'); }
   }
   async session(req: Request, recent=false): Promise<{id:string; data:Session}> {
-    const token=cookie(req,'vault_session'); if (!token) throw new HTTPError(401,'Sign in with your passkey');
+    const token=cookie(req,'vault_session'); if (!token) throw new HTTPError(401,'Sign in with a passkey or registered SSH key');
     const id=await hash(token), data=await this.ctx.storage.get<Session>('session:'+id);
     if (!data || data.expires<Date.now()) throw new HTTPError(401,'Session expired. Sign in again');
-    if (recent && Date.now()-data.verified>120000) throw new HTTPError(428,'Confirm your passkey again to continue');
+    if (recent && Date.now()-data.verified>120000) throw new HTTPError(428,'Confirm your passkey or SSH key again to continue');
     return {id,data};
   }
   async takeChallenge(req: Request, kind: string): Promise<Challenge> {
     const token=cookie(req,'vault_challenge'), id='challenge:'+await hash(token);
     const value=await this.ctx.storage.get<Challenge>(id); await this.ctx.storage.delete(id);
-    if(!token || !value || value.kind!==kind || value.expires<Date.now()) throw new HTTPError(400,'Passkey request expired. Try again');
+    if(!token || !value || value.kind!==kind || value.expires<Date.now()) throw new HTTPError(400,'Authentication request expired. Try again');
     return value;
   }
   async rate(req: Request): Promise<void> {
@@ -141,6 +141,25 @@ export class Vault extends DurableObject<Env> {
     if(path==='/api/ssh-keys/delete') {
       await this.session(req,true);const keys=await this.ctx.storage.get<SSHKey[]>('sshKeys')||[];await this.ctx.storage.put('sshKeys',keys.filter(k=>k.id!==body.id));
       const sessions=await this.ctx.storage.list({prefix:'session:'});await this.ctx.storage.delete([...sessions.keys()]);return json({ok:true},200,{'Set-Cookie':cookieHeader(req,'vault_session','',0)});
+    }
+    if(path==='/api/auth/ssh/options') {
+      const session=await this.session(req);
+      if(typeof body.publicKey!=='string')throw new HTTPError(400,'Paste your SSH public key');
+      let key;try{key=await parseSSHKey(body.publicKey);}catch{throw new HTTPError(403,'SSH key not recognized');}
+      const keys=await this.ctx.storage.get<SSHKey[]>('sshKeys')||[];
+      if(!keys.some(k=>k.id===key.id))throw new HTTPError(403,'SSH key not recognized');
+      const expires=Date.now()+300000;
+      const challenge=JSON.stringify({purpose:'Confirm sensitive action in Passkey Vault',origin:this.env.APP_ORIGIN,namespace:SSH_NAMESPACE,session:session.id,key:key.id,nonce:randomToken(),expires:new Date(expires).toISOString()})+'\n';
+      const token=randomToken();await this.ctx.storage.put('challenge:'+await hash(token),{challenge,kind:'ssh-confirm',expires,keyId:key.id,session:session.id} satisfies Challenge);await this.scheduleCleanup();
+      return json({challenge,expires,namespace:SSH_NAMESPACE},200,{'Set-Cookie':cookieHeader(req,'vault_challenge',token,300)});
+    }
+    if(path==='/api/auth/ssh/verify') {
+      const session=await this.session(req),c=await this.takeChallenge(req,'ssh-confirm');
+      if(c.session!==session.id)throw new HTTPError(403,'Session changed');
+      const keys=await this.ctx.storage.get<SSHKey[]>('sshKeys')||[],key=keys.find(k=>k.id===c.keyId);
+      if(!key||typeof body.signature!=='string'||!await verifySSHSignature(key.publicKey,c.challenge,body.signature))throw new HTTPError(403,'Invalid SSH signature. Start a new challenge');
+      await this.ctx.storage.put('session:'+session.id,{...session.data,verified:Date.now()} satisfies Session);
+      return json({ok:true});
     }
     if(path==='/api/recovery/options') {
       if(typeof body.publicKey!=='string')throw new HTTPError(400,'Paste your SSH public key');let key;try{key=await parseSSHKey(body.publicKey);}catch{throw new HTTPError(403,'Recovery key not recognized');}
