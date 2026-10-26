@@ -1,0 +1,9 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Approve site credential — Passkey Vault</title><link rel="stylesheet" href="/style.css"></head><body><main class="provider">
+<h1>Approve site credential</h1><p>This experimental provider stores site signing keys encrypted in your vault. SSH approval does not claim biometric/PIN user verification.</p>
+<p><a href="/" target="_blank" rel="noopener">Sign in to your vault with SSH</a>, then return here.</p>
+<p id="status" role="status">Waiting for the browser extension…</p>
+<pre id="details"></pre>
+<button id="load">Load request and credentials</button>
+<form id="prepare"><label>SSH approval key <select id="key" required></select></label><label>Site credential (sign-in only) <select id="credential"></select></label><button>Prepare approval challenge</button></form>
+<section id="approval" hidden><p>Check the site and account above. Sign the downloaded challenge with your registered SSH key using namespace <code>passkey-vault</code>.</p><a id="download" download="provider-challenge.txt">Download approval challenge</a><pre id="challenge"></pre><form id="complete"><label>SSH signature<textarea id="signature" required rows="6"></textarea></label><button>Approve this operation</button></form></section>
+<button id="cancel">Cancel</button><script type="module" src="/provider.js"></script></main></body></html>

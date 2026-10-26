@@ -11,3 +11,9 @@ public/
 .DS_Store
 *private-secrets*
 *production-secrets*
+
+# Disposable desktop integration artifacts
+test-ssh-key*
+test-approval.txt*
+approval-test.png
+workerd-nix
