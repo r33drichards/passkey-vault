@@ -1,0 +1,44 @@
+name: Cloudflare hello smoke
+on:
+  push:
+    branches: [smoke/cloudflare-hello-20261026]
+    paths: [.github/workflows/hello-smoke.yml]
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CF_ACCOUNT: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Deploy isolated free-tier Worker and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/workers"
+          name="pi-hello-smoke-20261026"
+          curl -fsS -H "Authorization: Bearer $CF_TOKEN" "$base/scripts" > scripts.json
+          jq -e '.success == true' scripts.json >/dev/null
+          if jq -e --arg n "$name" '.result[] | select(.id == $n)' scripts.json >/dev/null; then
+            echo 'Worker already exists; refusing blind overwrite'; exit 1
+          fi
+          echo 'export default {async fetch(request) { const path=new URL(request.url).pathname; if(path!=="/" && path!=="/health") return new Response("Not found",{status:404}); return Response.json({message:"Hello world",runtime:"cloudflare-workers",test:"pi-hello-smoke-20261026"}); }};' > worker.mjs
+          echo '{"main_module":"worker.mjs","compatibility_date":"2026-10-26","usage_model":"bundled"}' > metadata.json
+          curl -fsS -X PUT -H "Authorization: Bearer $CF_TOKEN" -F 'metadata=@metadata.json;type=application/json' -F 'worker.mjs=@worker.mjs;type=application/javascript+module' "$base/scripts/$name" > deploy.json
+          jq -e '.success == true' deploy.json >/dev/null || { jq '.errors' deploy.json; exit 1; }
+          curl -fsS -X POST -H "Authorization: Bearer $CF_TOKEN" -H 'Content-Type: application/json' --data '{"enabled":true}' "$base/scripts/$name/subdomain" > enable.json
+          jq -e '.success == true' enable.json >/dev/null
+          curl -fsS -H "Authorization: Bearer $CF_TOKEN" "$base/subdomain" > domain.json
+          subdomain=$(jq -er '.result.subdomain' domain.json)
+          url="https://$name.$subdomain.workers.dev"
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsS "$url/health" > response.json && jq -e '.message == "Hello world" and .test == "pi-hello-smoke-20261026"' response.json; then
+              echo "Verified: $url" >> "$GITHUB_STEP_SUMMARY"
+              echo "Verified: $url"
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1
