@@ -1,3 +1,5 @@
+import { createPasskey, signPasskey, validateRequest, type ProviderRequest } from '../src/provider';
+import { verifyRegistrationResponse, verifyAuthenticationResponse } from '@simplewebauthn/server';
 import { describe,it,expect,beforeEach } from 'vitest';
 import { SELF,env,runInDurableObject,reset } from 'cloudflare:test';
 import { totp,parseAccount,toURI,base32 } from '../src/totp';
@@ -150,4 +152,58 @@ describe('SSH sensitive-action confirmation',()=>{
     const flow=await start();await runInDurableObject(stub(),async(_,ctx)=>ctx.storage.put('challenge:'+await hash('expired-confirm'),{kind:'ssh-confirm',challenge:flow.challenge,session:await hash('test-session'),expires:Date.now()-1}));expect((await req('auth/ssh/verify',{signature:await flow.key.sign(flow.challenge)},flow.cookie+'; vault_challenge=expired-confirm')).status).toBe(400);
     const recovery=await req('recovery/options',{publicKey:flow.key.publicKey});const {challenge}=await recovery.json() as any;expect((await req('auth/ssh/verify',{signature:await flow.key.sign(challenge)},flow.cookie+'; '+recovery.headers.get('set-cookie')!.split(';')[0])).status).toBe(400);
   });
+});
+
+
+const site='http://localhost:9322';
+const createRequest=():ProviderRequest=>({kind:'create',options:{challenge:b64(crypto.getRandomValues(new Uint8Array(32))),rp:{id:'localhost',name:'Test site'},user:{id:b64(new Uint8Array([1,2,3])),name:'test-user'},pubKeyCredParams:[{type:'public-key',alg:-7}],extensions:{remoteDesktopClientOverride:{origin:site,sameOriginWithAncestors:true},credProps:true}}});
+describe('Site credential provider',()=>{
+ it('produces independently verifiable ES256 registration and assertions without claiming UV',async()=>{
+  const request=createRequest(),created=await createPasskey(request,[site],[]);
+  const registration=await verifyRegistrationResponse({response:created.response as any,expectedChallenge:request.options.challenge,expectedOrigin:site,expectedRPID:'localhost',requireUserVerification:false});
+  expect(registration.verified).toBe(true);expect(registration.registrationInfo!.userVerified).toBe(false);
+  const get:ProviderRequest={kind:'get',options:{challenge:b64(crypto.getRandomValues(new Uint8Array(32))),rpId:'localhost',extensions:request.options.extensions,allowCredentials:[{id:created.stored.id,type:'public-key'}]}};
+  const signed=await signPasskey(get,[site],created.stored);
+  const verify={response:signed.response as any,expectedChallenge:get.options.challenge,expectedOrigin:site,expectedRPID:'localhost',credential:registration.registrationInfo!.credential,requireUserVerification:false};
+  expect((await verifyAuthenticationResponse(verify)).verified).toBe(true);
+  expect(signed.stored.counter).toBe(1);
+  await expect(verifyAuthenticationResponse({...verify,expectedOrigin:'https://evil.example'})).rejects.toThrow();
+  await expect(verifyAuthenticationResponse({...verify,expectedChallenge:'different'})).rejects.toThrow();
+  await expect(verifyAuthenticationResponse({...verify,requireUserVerification:true})).rejects.toThrow();
+  await expect(createPasskey({...request,options:{...request.options,excludeCredentials:[{id:created.stored.id}]}},[site],[created.stored])).rejects.toThrow('excluded');
+  await expect(signPasskey({...get,options:{...get.options,allowCredentials:[{id:'wrong'}]}},[site],created.stored)).rejects.toThrow('not allowed');
+ });
+ it('fails closed on untrusted origins, frames, RP IDs, UV and extensions',()=>{
+  const request=createRequest();expect(()=>validateRequest(request,[])).toThrow();
+  for(const overrides of [{rp:{id:'com'}},{extensions:{}},{authenticatorSelection:{userVerification:'required'}},{extensions:{...request.options.extensions,prf:{}}},{extensions:{remoteDesktopClientOverride:{origin:site,sameOriginWithAncestors:false}}}])expect(()=>validateRequest({...request,options:{...request.options,...overrides}},[site])).toThrow();
+  const npm={...request,options:{...request.options,rp:{id:'npmjs.com'},extensions:{remoteDesktopClientOverride:{origin:'https://www.npmjs.com',sameOriginWithAncestors:true}}}};
+  expect(()=>validateRequest(npm,['https://www.npmjs.com'])).toThrow();
+  expect(validateRequest(npm,['https://www.npmjs.com','https://npmjs.com']).rpId).toBe('npmjs.com');
+ });
+ it('requires a session and transaction signature, encrypts keys, and rejects replay',async()=>{
+  expect((await req('provider/list',{})).status).toBe(401);
+  const cookie=await seed(),key=await ephemeralSSH();await req('ssh-keys/add',{publicKey:key.publicKey},cookie);const keyId=(await parseSSHKey(key.publicKey)).id;
+  const request=createRequest();
+  const prepared=await req('provider/prepare',{request,keyId},cookie);expect(prepared.status).toBe(200);const p=await prepared.json() as any;
+  expect(p.challenge).toContain(site);expect(p.challenge).toContain('test-user');
+  const signature=await key.sign(p.challenge);
+  const done=await req('provider/complete',{id:p.id,signature},cookie);expect(done.status).toBe(200);const result=await done.json() as any;
+  const stored=await runInDurableObject(stub(),(_,ctx)=>ctx.storage.get<string>('site-key:'+result.response.id));expect(stored).not.toContain('privateKey');
+  const listing=await (await req('provider/list',{},cookie)).text();expect(listing).toContain('test-user');expect(listing).not.toContain('privateKey');
+  expect((await req('provider/complete',{id:p.id,signature},cookie)).status).toBe(400);
+  const get:ProviderRequest={kind:'get',options:{challenge:b64(crypto.getRandomValues(new Uint8Array(32))),rpId:'localhost',extensions:request.options.extensions}};
+  const p2=await (await req('provider/prepare',{request:get,keyId,credentialId:result.response.id},cookie)).json() as any;
+  expect((await req('provider/complete',{id:p2.id,signature:await key.sign(p2.challenge)},cookie)).status).toBe(200);
+ });
+ it('invalidates changed, canceled, expired and wrong-session approvals',async()=>{
+  const cookie=await seed(),key=await ephemeralSSH();await req('ssh-keys/add',{publicKey:key.publicKey},cookie);const keyId=(await parseSSHKey(key.publicKey)).id;
+  const prepare=async()=>await (await req('provider/prepare',{request:createRequest(),keyId},cookie)).json() as any;
+  const p=await prepare(),newer=await prepare();
+  expect((await req('provider/complete',{id:p.id,signature:await key.sign(p.challenge)},cookie)).status).toBe(400);
+  expect((await req('provider/complete',{id:newer.id,signature:await key.sign(newer.challenge)},cookie)).status).toBe(400);
+  const canceled=await prepare();await req('provider/cancel',{},cookie);expect((await req('provider/complete',{id:canceled.id,signature:await key.sign(canceled.challenge)},cookie)).status).toBe(400);
+  const expired=await prepare();await runInDurableObject(stub(),async(_,ctx)=>{const id='provider-pending:'+await hash('test-session');const pending=await ctx.storage.get<any>(id);await ctx.storage.put(id,{...pending,expires:0});});expect((await req('provider/complete',{id:expired.id,signature:await key.sign(expired.challenge)},cookie)).status).toBe(400);
+  const other=await prepare();await runInDurableObject(stub(),async(_,ctx)=>ctx.storage.put('session:'+await hash('other-session'),{verified:Date.now(),expires:Date.now()+900000}));expect((await req('provider/complete',{id:other.id,signature:await key.sign(other.challenge)},'vault_session=other-session')).status).toBe(400);
+  expect((await req('provider/complete',{id:other.id,signature:await key.sign(other.challenge+'tampered')},cookie)).status).toBe(403);
+ });
 });

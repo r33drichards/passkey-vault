@@ -1,10 +1,11 @@
+import { providerRoute, ProviderError } from './provider-api';
 import { parsePassword, parseBitwarden, type PasswordEntry } from './passwords';
 import { DurableObject } from 'cloudflare:workers';
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse, type WebAuthnCredential, type RegistrationResponseJSON, type AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { randomToken, hash, equalSecret, encrypt, decrypt, b64, unb64 } from './crypto';
 import { parseSSHKey, verifySSHSignature, SSH_NAMESPACE, type SSHKey } from './ssh';
 import { parseAccount, totp, toURI, type Account } from './totp';
-export interface Env { VAULT: DurableObjectNamespace<Vault>; ASSETS: Fetcher; APP_ORIGIN: string; VAULT_KEY: string; SETUP_KEY: string }
+export interface Env { VAULT: DurableObjectNamespace<Vault>; ASSETS: Fetcher; APP_ORIGIN: string; VAULT_KEY: string; SETUP_KEY: string; PROVIDER_ORIGINS?: string }
 type Credential = { id: string; publicKey: string; counter: number; transports?: WebAuthnCredential['transports']; name: string; created: number };
 type Challenge = { challenge: string; kind: 'setup'|'add'|'login'|'ssh'|'ssh-confirm'; expires: number; session?: string; name?: string; keyId?: string };
 type Session = { expires: number; verified: number };
@@ -32,7 +33,7 @@ export default {
       }
       if (!['GET','HEAD'].includes(req.method)) throw new HTTPError(405,'Method not allowed');
       return secure(await env.ASSETS.fetch(req));
-    } catch (e) { return secure(json({error:e instanceof HTTPError ? e.message : 'Request failed'},e instanceof HTTPError ? e.status : 500)); }
+    } catch (e) { return secure(json({error:e instanceof HTTPError || e instanceof ProviderError ? e.message : 'Request failed'},e instanceof HTTPError || e instanceof ProviderError ? e.status : 500)); }
   }
 };
 export class Vault extends DurableObject<Env> {
@@ -41,7 +42,7 @@ export class Vault extends DurableObject<Env> {
     // credential counter, or one-time setup cannot be raced by another request.
     return this.ctx.blockConcurrencyWhile(async () => {
       try { return await this.route(req); }
-      catch (e) { return json({error: e instanceof HTTPError ? e.message : 'Unable to complete request'}, e instanceof HTTPError ? e.status : 500); }
+      catch (e) { return json({error: e instanceof HTTPError || e instanceof ProviderError ? e.message : 'Unable to complete request'}, e instanceof HTTPError || e instanceof ProviderError ? e.status : 500); }
     });
   }
   async body(req: Request, limit=16384): Promise<Record<string,unknown>> {
@@ -76,7 +77,7 @@ export class Vault extends DurableObject<Env> {
   async scheduleCleanup() { if(await this.ctx.storage.getAlarm()===null) await this.ctx.storage.setAlarm(Date.now()+600000); }
   async alarm() {
     // Bounded lists; continue cleanup if a prefix ever exceeds one page.
-    for(const prefix of ['session:','challenge:','rate:']) {
+    for(const prefix of ['session:','challenge:','rate:','provider-pending:']) {
       let start: string|undefined;
       while(true){ const rows=await this.ctx.storage.list<Session|Challenge|number>({prefix,startAfter:start,limit:500}); if(!rows.size)break;
         const stale:string[]=[]; for(const [k,v] of rows){start=k;if(prefix==='rate:' ? Number(k.split(':')[1])<Math.floor(Date.now()/60000)-2 : (v as Session).expires<Date.now())stale.push(k);} if(stale.length)await this.ctx.storage.delete(stale);if(rows.size<500)break;
@@ -103,6 +104,11 @@ export class Vault extends DurableObject<Env> {
     if(req.method==='GET' && path==='/api/passkeys') {await this.session(req);const credentials=await this.ctx.storage.get<Credential[]>('credentials')||[];return json({passkeys:credentials.map(c=>({id:c.id,name:c.name,created:c.created}))});}
     if(req.method==='GET' && path==='/api/ssh-keys') {await this.session(req);return json({keys:await this.ctx.storage.get<SSHKey[]>('sshKeys')||[]});}
     if(req.method!=='POST') throw new HTTPError(404,'Not found');
+    if(path.startsWith('/api/provider/')) {
+      const session=await this.session(req);await this.rate(req);
+      const result=await providerRoute(path,await this.body(req),session.id,this.ctx.storage,this.env);
+      await this.scheduleCleanup();return json(result);
+    }
     if(path.startsWith('/api/passwords/'))await this.session(req,true);
     const body=await this.body(req,path==='/api/passwords/import'?2*1024*1024:path==='/api/passwords/save'?65536:16384);
     if(path.startsWith('/api/passwords/')) {

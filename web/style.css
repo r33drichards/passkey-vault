@@ -6,3 +6,6 @@
 
 .qr-drop-zone{display:block;width:100%;border:1px dashed #b7c7a6;border-radius:10px;background:#f8fbf3;color:var(--ink);padding:19px;margin-top:14px;text-align:center}.qr-drop-zone strong{display:block;font-size:13px}.qr-drop-zone span{display:block;font-size:11px;font-weight:400;color:var(--muted);margin-top:7px}.qr-drop-zone.drag-active{border:2px solid #739d43;background:#e6f2d7;padding:18px}.qr-drop-zone:hover{background:#edf5e4}
 #passwords{margin:20px 0 36px}#passwords .actions{flex-wrap:wrap}#passwords .muted{overflow-wrap:anywhere;font-size:12px}#passwords button{padding:9px 12px}#import-preview{white-space:pre-wrap;overflow-wrap:anywhere}
+
+/* Site credential approval must remain readable at narrow desktop widths. */
+.provider{max-width:900px;padding:32px 22px}.provider h1{font-size:clamp(28px,5vw,42px)}.provider pre{white-space:pre-wrap;overflow-wrap:anywhere;background:white;border:1px solid var(--line);border-radius:10px;padding:16px;font-size:13px}.provider form{display:grid;gap:16px;margin:24px 0}.provider label{display:grid;gap:8px}.provider select,.provider textarea{width:100%;min-width:0;padding:10px;border:1px solid var(--line);border-radius:8px;background:white}.provider button{justify-self:start}.provider #status{font-weight:600}
