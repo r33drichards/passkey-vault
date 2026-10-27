@@ -1,0 +1,84 @@
+name: Git embedded engine Workers proof
+on:
+  push:
+    branches: [smoke/cloudflare-hello-20261026]
+    paths: [.github/workflows/git-embed-proof.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify Git provenance and obtain validated Git-built package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          gh api repos/r33drichards/mcp-js/actions/runs/40272173219 > evidence/source-run.json
+          jq -e '.head_sha == "e1f1d6552c5a2c2d3e7d39b069c1d07707dbc2f3"' evidence/source-run.json
+          gh api repos/r33drichards/mcp-js/actions/runs/40272173219/jobs > evidence/source-jobs.json
+          jq -e '.jobs[] | select(.name == "Build node tarball" and .conclusion == "success")' evidence/source-jobs.json
+          gh run download 40272173219 -R r33drichards/mcp-js -n npm-tarball-node -D artifact
+          sha256sum artifact/*.tgz | tee evidence/package-sha256.txt
+          git clone --filter=blob:none --no-checkout https://github.com/r33drichards/mcp-js.git source
+          git -C source checkout e1f1d6552c5a2c2d3e7d39b069c1d07707dbc2f3
+          cp source/node/README.md evidence/build-procedure.md
+          cp source/node/package.json evidence/source-package.json
+      - name: Install Git-built artifact and tooling (not npm engine distribution)
+        run: |
+          npm init -y
+          npm install ./artifact/*.tgz wrangler@4.45.0
+          cp package-lock.json evidence/
+          cat > control.mjs <<'JS'
+          import { Engine } from '@wholelottahoopla/mcp-js-node';
+          const engine = Engine.createStateless(64n, 1n);
+          try {
+            const result = JSON.parse(await engine.callToolAsync('run_js', JSON.stringify({code:'console.log(6 * 7)'}), undefined, undefined));
+            console.log(JSON.stringify(result));
+            if (!JSON.stringify(result).includes('42')) throw new Error('Missing engine result');
+          } finally { engine.close(); engine.uniffiDestroy(); }
+          JS
+          timeout 30s node control.mjs | tee evidence/linux-control.log
+      - name: Actual Workers import and execution fixture
+        run: |
+          cat > worker.mjs <<'JS'
+          import { Engine } from '@wholelottahoopla/mcp-js-node';
+          export default { async fetch() {
+            const engine = Engine.createStateless(64n, 1n);
+            try {
+              const result = JSON.parse(await engine.callToolAsync('run_js', JSON.stringify({code:'console.log(6 * 7)'}), undefined, undefined));
+              return Response.json({commit:'e1f1d6552c5a2c2d3e7d39b069c1d07707dbc2f3', result});
+            } finally { engine.close(); engine.uniffiDestroy(); }
+          }};
+          JS
+          cat > wrangler.json <<'JSON'
+          {"name":"pi-git-embed-proof-20261027","main":"worker.mjs","compatibility_date":"2026-10-26","compatibility_flags":["nodejs_compat"],"workers_dev":true}
+          JSON
+          cp worker.mjs wrangler.json evidence/
+          set +e
+          npx wrangler deploy --dry-run --outdir bundle > evidence/workers-bundle.log 2>&1
+          rc=$?
+          echo "$rc" > evidence/workers-bundle.exit
+          cat evidence/workers-bundle.log
+          exit "$rc"
+      - name: Deploy only if actual engine bundles
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -o pipefail
+          npx wrangler deploy 2>&1 | tee evidence/deploy.log
+          curl --fail --retry 3 https://pi-git-embed-proof-20261027.rwendt1337.workers.dev/ | tee evidence/live-result.json
+          jq -e '.result | tostring | contains("42")' evidence/live-result.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: git-workers-embedding-evidence
+          path: evidence/
+          retention-days: 14
