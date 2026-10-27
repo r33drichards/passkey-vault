@@ -31556,11 +31556,11 @@ var OwnerAuthority = class {
     }
   }
   async verifyInference() {
-    const previous = await this.read("inference-proof");
+    const previous = await this.read("inference-proof-v2");
     if (previous) return previous;
     const credential = await this.modelCredential();
     const pending = { status: "in-progress", phase: "catalog", startedAt: this.now(), pi: "1.4.0" };
-    await this.save("inference-proof", pending);
+    await this.save("inference-proof-v2", pending);
     let result;
     try {
       const response = await this.fetcher("https://api.openai.com/v1/models", {
@@ -31572,14 +31572,16 @@ var OwnerAuthority = class {
         await response.body?.cancel();
         result = { ...pending, status: "blocked", phase: "catalog", httpStatus: response.status };
       } else {
-        const catalog = JSON.parse(await limitedText(response.body, 512 * 1024));
+        pending.phase = "catalog-parse";
+        const catalog = JSON.parse(await limitedText(response.body, 4 * 1024 * 1024));
+        pending.phase = "catalog-select";
         const models = (catalog.models || []).filter((m) => m.visibility === "list" && typeof m.slug === "string");
         const selected = models.find((m) => m.slug === "gpt-6.1-sol") || models[0];
         if (!selected) result = { ...pending, status: "blocked", phase: "catalog", reason: "no-visible-models" };
         else {
           pending.phase = "inference";
           pending.model = selected.slug;
-          await this.save("inference-proof", pending);
+          await this.save("inference-proof-v2", pending);
           let completed = false, providerCode, httpStatus;
           const model = { id: selected.slug, name: selected.display_name || selected.slug, api: "openai-responses", provider: "openai", baseUrl: "https://api.openai.com/v1", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32e3, maxTokens: 256 };
           const agent = new Agent({
@@ -31616,11 +31618,11 @@ var OwnerAuthority = class {
           };
         }
       }
-    } catch {
-      result = { ...pending, status: "blocked", reason: "verification-exception" };
+    } catch (e) {
+      result = { ...pending, status: "blocked", reason: e.safe && e.status === 413 ? "catalog-too-large" : { TypeError: "type-error", SyntaxError: "invalid-json", TimeoutError: "timeout", AbortError: "aborted" }[e.name] || "verification-exception" };
     }
     result.finishedAt = this.now();
-    await this.save("inference-proof", result);
+    await this.save("inference-proof-v2", result);
     return result;
   }
   // Internal integration seam for the webhook/Pi runtime. Not an HTTP route or
