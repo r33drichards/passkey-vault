@@ -33,7 +33,7 @@ jobs:
       - name: Install Git-built artifact and tooling (not npm engine distribution)
         run: |
           npm init -y
-          npm install ./artifact/*.tgz wrangler@4.45.0
+          npm install ./artifact/*.tgz wrangler@4.153.0
           cp package-lock.json evidence/
           cat > control.mjs <<'JS'
           import { Engine } from '@wholelottahoopla/mcp-js-node';
