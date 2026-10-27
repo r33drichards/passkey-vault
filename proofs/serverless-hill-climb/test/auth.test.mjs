@@ -210,3 +210,20 @@ test('alarm never replays uncertain in-flight execution after restart',async()=>
   assert.equal((await auth.read('run:uncertain')).status,'interrupted');
   assert.equal(await storage.get('active-run'),undefined);
 });
+
+test('owner admin exposes model setup and CSRF-protected verification',async()=>{
+  const {auth}=fixture();
+  await auth.save('github-app',{slug:'test-app'});
+  const current=await session(auth);
+  let html=await (await auth.fetch(req('/admin',{headers:{Cookie:current.cookie}}))).text();
+  assert.match(html,/Connect ChatGPT/);
+  assert.doesNotMatch(html,/Verify model connection/);
+  await auth.save('chatgpt',{status:'ready'});
+  html=await (await auth.fetch(req('/admin',{headers:{Cookie:current.cookie}}))).text();
+  assert.match(html,/Verify model connection/);
+  let calls=0;auth.verifyInference=async()=>{calls++;return {status:'passed'};};
+  assert.equal((await auth.fetch(post('/admin/chatgpt/verify',current.cookie,{},'https://evil.test'))).status,403);
+  assert.equal(calls,0);
+  assert.equal((await auth.fetch(post('/admin/chatgpt/verify',current.cookie))).status,303);
+  assert.equal(calls,1);
+});

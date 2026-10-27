@@ -62,7 +62,7 @@ async function limitedText(body, limit) {
 
 // Worker routes are explicitly allowlisted. No public credential-export route.
 const ROUTES = new Set(['/github/events','/webhook','/runs','/admin','/setup/callback','/auth/github','/auth/github/callback',
-  '/ops/lambda-probe','/ops/verify','/admin/chatgpt/start','/admin/chatgpt','/admin/chatgpt/complete','/admin/chatgpt/disconnect','/admin/logout']);
+  '/admin/chatgpt/verify','/ops/lambda-probe','/ops/verify','/admin/chatgpt/start','/admin/chatgpt','/admin/chatgpt/complete','/admin/chatgpt/disconnect','/admin/logout']);
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -175,7 +175,9 @@ export class OwnerAuthority {
       if (!app) return this.setupPage();
       if (!s) return page(`<section><h2>Sign in to administer your agent</h2><p>Access is restricted to <strong>${escape(this.env.GITHUB_OWNER_LOGIN)}</strong>.</p><a class="button" href="/auth/github">Continue with GitHub</a></section>`);
       const recent=await this.read('gh-last');
-      return page(`<p>Signed in as ${escape(this.env.GITHUB_OWNER_LOGIN)}</p><section><h2>PR acknowledgement agent</h2><p>Install this app on selected repositories in your personal account. Label an open PR <code>hill climb</code> or <code>hillclimb</code>; the app comments once per PR.</p><a class="button" href="https://github.com/apps/${escape(app.slug)}/installations/new">Install on repositories</a><p>Webhook: <code>/github/events</code></p><p>Slice: fixed acknowledgement only. No model calls, code changes, merges, or Modal allocations.</p><p>Last job: ${escape(recent ? recent.status+' · '+recent.repo+'#'+recent.number : 'No matching delivery yet')}</p></section>${form(s,'/admin/logout','Sign out',true)}`);
+      const connected=(await this.read('chatgpt'))?.status==='ready';
+      const proof=await this.read('inference-proof-v2');
+      return page(`<p>Signed in as ${escape(this.env.GITHUB_OWNER_LOGIN)}</p><section><h2>PR acknowledgement agent</h2><p>Install this app on selected repositories in your personal account. Label an open PR <code>hill climb</code> or <code>hillclimb</code>; the app comments once per PR.</p><a class="button" href="https://github.com/apps/${escape(app.slug)}/installations/new">Install on repositories</a><p>Webhook: <code>/github/events</code></p><p>Slice: fixed acknowledgement only. No model calls, code changes, merges, or Modal allocations.</p><p>Last job: ${escape(recent ? recent.status+' · '+recent.repo+'#'+recent.number : 'No matching delivery yet')}</p></section><section><h2>Model connection</h2><p>${connected?'Connected':'Not connected'} · Inference: ${escape(proof?.status || 'not verified')}</p>${form(s,'/admin/chatgpt/start',connected?'Reconnect ChatGPT':'Connect ChatGPT')}${connected?form(s,'/admin/chatgpt/verify','Verify model connection'):''}</section>${form(s,'/admin/logout','Sign out',true)}`);
     }
     if(path==='/setup/callback' && request.method==='GET') {
       if(app) fail('GitHub is already configured.',409);
@@ -214,6 +216,11 @@ export class OwnerAuthority {
       await this.storage.delete('chatgpt-pending');
       return redirect('/admin',[cookie('session','',0)]);
     }
+    if(path==='/admin/chatgpt/verify') {
+      await this.post(request,s);
+      await this.verifyInference();
+      return redirect('/admin');
+    }
     if(path==='/admin/chatgpt/start') {
       await this.post(request,s);
       const old=await this.read('chatgpt');
@@ -225,7 +232,7 @@ export class OwnerAuthority {
     if(path==='/admin/chatgpt' && request.method==='GET') {
       const pending=await this.pending(s);
       const dest=new URL(OPENAI_ISSUER+'/api/accounts/authorize');
-      dest.search=new URLSearchParams({client_id:pending.clientId,agent_name_hint:'Durable Pi Modal',ext_agent_host_id:pending.host,response_type:'code',redirect_uri:CALLBACK,resource:RESOURCE,scope:SCOPES,state:pending.state,nonce:pending.nonce,code_challenge:await hash(pending.verifier),code_challenge_method:'S256'}).toString();
+      dest.search=new URLSearchParams({client_id:pending.clientId,agent_name_hint:'Serverless Hill Climb',ext_agent_host_id:pending.host,response_type:'code',redirect_uri:CALLBACK,resource:RESOURCE,scope:SCOPES,state:pending.state,nonce:pending.nonce,code_challenge:await hash(pending.verifier),code_challenge_method:'S256'}).toString();
       return page(`<section><h2>Connect your ChatGPT account</h2><p>Open ChatGPT in a new tab and approve access for your personal agent.</p><a class="button" target="_blank" rel="noopener noreferrer" href="${escape(dest)}">Continue with ChatGPT</a><p>After approval, your browser may show a connection error at <code>127.0.0.1:1455</code>. Copy the <strong>complete URL</strong> from that tab’s address bar and paste it here.</p><form method="post" action="/admin/chatgpt/complete">${csrfInput(s)}<label for="callback">Final redirect URL</label><input id="callback" name="callback" type="url" required autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:1455/auth/callback?…"><button>Save ChatGPT connection</button></form><p class="muted">Only this private page should receive the URL. Never paste it into chat.</p></section><a href="/admin">Back to admin</a>`);
     }
     if(path==='/admin/chatgpt/complete') {
