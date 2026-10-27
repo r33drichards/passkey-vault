@@ -1,0 +1,6 @@
+{
+  "repository": "r33drichards/durable-pi-modal",
+  "commit": "986a0985ed2e5c7916b9f8ada203c855443b82f2",
+  "bundle_sha256": "87ecc6a14f36d9adccd77d7ad7c286b516c27b61c966da56beaebaec7ad35c6f",
+  "validation": "15/15 auth tests; esbuild; Wrangler 4.153.0 dry-run, all on Modal"
+}

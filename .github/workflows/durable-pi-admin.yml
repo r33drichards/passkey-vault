@@ -1,0 +1,21 @@
+name: Deploy Durable Pi admin
+on:
+  push:
+    branches: [smoke/cloudflare-hello-20261026]
+    paths: [.github/workflows/durable-pi-admin.yml, proofs/durable-pi-admin/**]
+permissions:
+  contents: read
+concurrency:
+  group: durable-pi-admin-deployment
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy isolated owner-only admin and verify access controls
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: python3 proofs/durable-pi-admin/deploy.py
