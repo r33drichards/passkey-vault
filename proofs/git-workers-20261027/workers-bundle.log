@@ -1,0 +1,18 @@
+
+ ⛅️ wrangler 4.153.0
+────────────────────
+
+Cloudflare collects anonymous telemetry about your usage of Wrangler. Learn more at https://github.com/cloudflare/workers-sdk/tree/main/packages/wrangler/telemetry.md
+
+[31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mBuild failed with 1 error:[0m
+
+  [31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mNo loader is configured for ".node" files: node_modules/@ubjs/node-linux-x64-gnu/uniffi-runtime-napi.linux-x64-gnu.node[0m
+  
+      node_modules/@ubjs/node/index.js:190:38:
+  [37m      190 │               nativeBinding = require([32m'@ubjs/node-linux-x64-gnu'[37m)
+            ╵                                       [32m~~~~~~~~~~~~~~~~~~~~~~~~~~[0m
+  
+  
+
+
+🪵  Logs were written to "/home/runner/.config/.wrangler/logs/wrangler-2026-10-27_00-10-53_647.log"
