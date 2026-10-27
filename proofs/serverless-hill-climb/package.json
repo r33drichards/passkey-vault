@@ -1,0 +1,19 @@
+{
+  "name": "durable-pi-modal-admin",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build": "esbuild src/worker.mjs --bundle --format=esm --platform=browser --external:node:* --target=es2022 --outfile=dist/worker.mjs",
+    "check:worker": "wrangler deploy --dry-run --outdir=dist/workerd"
+  },
+  "dependencies": {
+    "jose": "6.2.13",
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "wrangler": "4.153.0"
+  }
+}
