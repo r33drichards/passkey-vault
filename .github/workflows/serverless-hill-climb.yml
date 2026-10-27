@@ -23,7 +23,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/hillclimb"
           openssl enc -d -aes-256-cbc -pbkdf2 -in proofs/serverless-hill-climb/source.tar.enc -out "$RUNNER_TEMP/hillclimb-source.tar" -pass env:HILLCLIMB_BUILD_KEY
-          echo "c301aaae3caa3c3bd57750f9bf6debb111ac4c7214ab1e1302d8c5190b49c1c6  $RUNNER_TEMP/hillclimb-source.tar" | sha256sum -c -
+          echo "6c15201d28c24c6b333a510903573164e9975dce239ac7ad26b05954773433fa  $RUNNER_TEMP/hillclimb-source.tar" | sha256sum -c -
           tar -xf "$RUNNER_TEMP/hillclimb-source.tar" -C "$RUNNER_TEMP/hillclimb"
       - name: Test and bundle Pi transport
         working-directory: ${{ runner.temp }}/hillclimb
