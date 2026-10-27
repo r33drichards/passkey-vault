@@ -1,6 +1,6 @@
 {
   "repository": "r33drichards/durable-pi-modal",
-  "commit": "a1a187d4c036e93e34ed89d960449749da7ceb80",
-  "bundle_sha256": "e67df0972b567bfaad016bc48d8abac94b504ed5b256fc23f62c437af5a9c144",
-  "validation": "16/16 auth tests; esbuild; Wrangler 4.153.0 dry-run, all on Modal; redirect mode regression"
+  "commit": "01b7858e8d88be9a15c4ee8d333eb55e0d107614",
+  "bundle_sha256": "522fa092916504bc33e008c56ccfe86fb0ac82796a83e29bb727db159709247c",
+  "validation": "19/19 remote security/checkpoint tests; Wrangler dry-run; 3/3 live real-Pi Modal webhook acceptance runs; cleanup verified"
 }
