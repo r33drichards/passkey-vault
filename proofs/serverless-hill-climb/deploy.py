@@ -104,7 +104,7 @@ if os.environ.get('GITHUB_STEP_SUMMARY'):
     with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f: f.write(summary)
 
 
-request=urllib.request.Request(origin+'/ops/lambda-probe',method='POST',data=b'',headers={'Authorization':'Bearer '+os.environ['HILL_VERIFY_KEY']})
+request=urllib.request.Request(origin+'/ops/lambda-probe',method='POST',data=b'',headers={'Authorization':'Bearer '+os.environ['HILL_VERIFY_KEY'],'User-Agent':'durable-pi-modal-smoke/1.0'})
 with client.open(request,timeout=55) as response:
     proof=json.load(response)
 assert proof.get('status')=='passed' and proof.get('transport')=='lambda', 'Lambda transport probe failed'
