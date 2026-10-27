@@ -51,6 +51,9 @@ bindings=[
     {'type':'plain_text','name':'GITHUB_OWNER_ID','text':OWNER},
     {'type':'plain_text','name':'GITHUB_OWNER_LOGIN','text':'r33drichards'},
     {'type':'durable_object_namespace','name':'AUTH','class_name':'OwnerAuthority'},
+    {'type':'plain_text','name':'PI_TOOL_TRANSPORT','text':'lambda'},
+    {'type':'secret_text','name':'LAMBDA_CLIENT_SECRET','text':os.environ['LAMBDA_CLIENT_SECRET']},
+    {'type':'secret_text','name':'VERIFY_KEY','text':os.environ['HILL_VERIFY_KEY']},
 ]
 metadata={'compatibility_flags':['nodejs_compat'],'main_module':'worker.mjs','compatibility_date':'2026-10-27','bindings':bindings,'observability':{'enabled':False}}
 if exists:
@@ -58,6 +61,8 @@ if exists:
     prior={b['name']:b for b in settings.get('bindings',[])}
     if prior.get('GITHUB_OWNER_ID',{}).get('text')!=OWNER or prior.get('AUTH',{}).get('class_name')!='OwnerAuthority' or prior.get('VAULT_KEY',{}).get('type')!='secret_text':
         raise RuntimeError('Existing Worker does not match this application; refusing overwrite')
+    known={b['name'] for b in bindings}
+    bindings.extend(b for b in settings.get('bindings',[]) if b['name'] not in known and b.get('type')!='secret_text')
     metadata['keep_bindings']=['secret_text']
 else:
     bindings.append({'type':'secret_text','name':'VAULT_KEY','text':base64.b64encode(secrets.token_bytes(32)).decode()})
@@ -98,3 +103,9 @@ print(summary)
 if os.environ.get('GITHUB_STEP_SUMMARY'):
     with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f: f.write(summary)
 
+
+request=urllib.request.Request(origin+'/ops/lambda-probe',method='POST',data=b'',headers={'Authorization':'Bearer '+os.environ['HILL_VERIFY_KEY']})
+with client.open(request,timeout=55) as response:
+    proof=json.load(response)
+assert proof.get('status')=='passed' and proof.get('transport')=='lambda', 'Lambda transport probe failed'
+print(json.dumps({'lambdaTransportProof':proof}))

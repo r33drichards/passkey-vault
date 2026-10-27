@@ -303,6 +303,152 @@ var require_x509_transport_state = __commonJS({
   }
 });
 
+// src/mcp.mjs
+var LAMBDA_ENDPOINT = "https://o27o445mvjsctrp4tryanmdste0pbjfi.lambda-url.us-east-1.on.aws/mcp";
+var TOKEN_ENDPOINT = "https://keycloak-production-295b.up.railway.app/realms/pi-lambda/protocol/openid-connect/token";
+var NativeMcp = class {
+  constructor(fetcher, lease) {
+    const u = new URL(lease.url);
+    if (u.protocol !== "https:" || u.username || u.password || u.search || u.hash || !(lease.transport === "lambda" ? u.href === LAMBDA_ENDPOINT : u.hostname.endsWith(".modal.host"))) throw Error("invalid-connect-url");
+    if (typeof lease.token !== "string" || !lease.token || typeof lease.sandbox !== "string") throw Error("invalid-lease");
+    this.fetcher = fetcher;
+    this.lease = lease;
+    this.sequence = 0;
+  }
+  async rpc(method, params, notify = false) {
+    const id = notify ? void 0 : ++this.sequence;
+    const token = this.getToken ? await this.getToken() : this.lease.token;
+    if (this.lease.transport === "lambda") params = { ...params, _meta: { ...params?._meta, "io.modelcontextprotocol/protocolVersion": this.protocol, "io.modelcontextprotocol/clientCapabilities": {} } };
+    const headers = { Authorization: "Bearer " + token, "Content-Type": "application/json", Accept: "application/json, text/event-stream", "MCP-Protocol-Version": this.protocol || "2024-11-05" };
+    if (this.lease.transport === "lambda") {
+      headers["Mcp-Method"] = method;
+      if (params?.name) headers["Mcp-Name"] = params.name;
+      headers["X-MCP-Session-Id"] = this.lease.session;
+    }
+    if (this.session) headers["Mcp-Session-Id"] = this.session;
+    const r = await this.fetcher(this.lease.url, { method: "POST", redirect: "manual", headers, body: JSON.stringify({ jsonrpc: "2.0", ...notify ? {} : { id }, method, ...params ? { params } : {} }), signal: AbortSignal.timeout(45e3) });
+    if (!r.ok) {
+      await r.body?.cancel();
+      throw Error("mcp-http-failed-no-replay");
+    }
+    const session = r.headers.get("Mcp-Session-Id");
+    if (session) this.session = session;
+    if (notify) {
+      await r.body?.cancel();
+      return;
+    }
+    const reader = r.body?.getReader();
+    if (!reader) throw Error("mcp-empty");
+    const decoder2 = new TextDecoder();
+    let total = 0, buffer = "";
+    const sse = (r.headers.get("Content-Type") || "").includes("text/event-stream");
+    const result = (msg) => {
+      if (msg?.jsonrpc !== "2.0" || msg.id !== id) return;
+      if (msg.error) throw Error("mcp-protocol-error");
+      if (!("result" in msg)) throw Error("mcp-invalid-result");
+      return { value: msg.result };
+    };
+    try {
+      for (; ; ) {
+        const { value, done } = await reader.read();
+        if (value) {
+          total += value.length;
+          if (total > 65536) throw Error("mcp-output-limit");
+          buffer += decoder2.decode(value, { stream: true });
+        }
+        if (sse) {
+          let match;
+          while (match = /\r?\n\r?\n/.exec(buffer)) {
+            const event = buffer.slice(0, match.index);
+            buffer = buffer.slice(match.index + match[0].length);
+            const data = event.split(/\r?\n/).filter((x) => x.startsWith("data:")).map((x) => x.slice(5).replace(/^ /, "")).join("\n");
+            if (!data.trim()) continue;
+            const found = result(JSON.parse(data));
+            if (found) return found.value;
+          }
+        }
+        if (done) {
+          if (!sse) {
+            const found = result(JSON.parse(buffer));
+            if (found) return found.value;
+          }
+          throw Error("mcp-missing-result");
+        }
+      }
+    } finally {
+      await reader.cancel().catch(() => {
+      });
+    }
+  }
+  async initialize() {
+    const info = await this.rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "serverless-hill-climb", version: "1" } });
+    if (info.protocolVersion !== "2024-11-05") throw Error("unsupported-mcp-version");
+    this.protocol = info.protocolVersion;
+    await this.rpc("notifications/initialized", void 0, true);
+  }
+  async run(code) {
+    const result = await this.rpc("tools/call", { name: "run_js", arguments: this.lease.transport === "lambda" ? { code, wait: true, execution_timeout_secs: 15, fs: this.lease.session } : { code } });
+    if (!Array.isArray(result?.content)) throw Error("invalid-mcp-tool-result");
+    return result;
+  }
+};
+var LambdaMcp = class extends NativeMcp {
+  constructor(fetcher, secret, session, now = () => Date.now()) {
+    super(fetcher, { url: LAMBDA_ENDPOINT, token: "oauth-managed", sandbox: "lambda", transport: "lambda", session });
+    if (typeof secret !== "string" || !secret) throw Error("lambda-oauth-not-configured");
+    if (typeof session !== "string" || !/^pi-[a-f0-9]{64}$/.test(session)) throw Error("invalid-lambda-session");
+    this.protocol = "2026-07-28";
+    let cached, expires = 0;
+    this.getToken = async () => {
+      if (cached && now() < expires) return cached;
+      const r = await fetcher(TOKEN_ENDPOINT, { method: "POST", redirect: "manual", headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" }, body: new URLSearchParams({ grant_type: "client_credentials", client_id: "pi-lambda-client", client_secret: secret }).toString(), signal: AbortSignal.timeout(15e3) });
+      if (!r.ok) {
+        await r.body?.cancel();
+        throw Error("oauth-token-failed");
+      }
+      let data;
+      try {
+        const reader = r.body.getReader();
+        let text = "", bytes = 0;
+        const dec2 = new TextDecoder();
+        try {
+          for (; ; ) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            bytes += value.length;
+            if (bytes > 16384) throw Error();
+            text += dec2.decode(value, { stream: true });
+          }
+        } finally {
+          await reader.cancel().catch(() => {
+          });
+        }
+        data = JSON.parse(text);
+      } catch {
+        throw Error("oauth-invalid-response");
+      }
+      if (typeof data.access_token !== "string" || !data.access_token || data.token_type?.toLowerCase() !== "bearer" || !Number.isFinite(data.expires_in) || data.expires_in <= 30) throw Error("oauth-invalid-response");
+      cached = data.access_token;
+      expires = now() + (Math.min(data.expires_in, 300) - 30) * 1e3;
+      return cached;
+    };
+  }
+  async initialize() {
+  }
+  async run(code) {
+    const result = await super.run(code);
+    const text = result.content.find((c) => c.type === "text")?.text;
+    let execution;
+    try {
+      execution = JSON.parse(text);
+    } catch {
+      throw Error("invalid-inline-execution");
+    }
+    if (!["completed", "failed", "cancelled", "timed_out"].includes(execution.status)) throw Error("nonterminal-inline-execution");
+    return { ...result, isError: !!result.isError || execution.status !== "completed" };
+  }
+};
+
 // node_modules/jose/dist/webapi/lib/buffer_utils.js
 var encoder = new TextEncoder();
 var decoder = new TextDecoder();
@@ -31791,7 +31937,7 @@ var worker_default = {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.origin !== env.PUBLIC_ORIGIN) return new Response("Wrong host", { status: 421, headers: HEADERS });
-    if (url.pathname === "/health" && request.method === "GET") return Response.json({ service: "serverless-hill-climb", admin: "deployed", webhook: "checkpointed" }, { headers: HEADERS });
+    if (url.pathname === "/health" && request.method === "GET") return Response.json({ service: "serverless-hill-climb", admin: "deployed", webhook: "checkpointed", toolTransport: env.PI_TOOL_TRANSPORT || "modal" }, { headers: HEADERS });
     if (url.pathname === "/") return redirect("/admin");
     if (!ROUTES.has(url.pathname)) return new Response("Not found", { status: 404, headers: HEADERS });
     return env.AUTH.get(env.AUTH.idFromName("owner")).fetch(request);
@@ -31904,6 +32050,15 @@ var OwnerAuthority = class {
     if (url.origin !== origin) fail("Wrong host.", 421);
     if (path2 === "/github/events") return githubEvent(this, request);
     if (path2 === "/webhook" || path2 === "/runs") return this.webhook(request);
+    if (path2 === "/ops/lambda-probe") {
+      if (request.method !== "POST" || !this.env.VERIFY_KEY || request.headers.get("Authorization") !== "Bearer " + this.env.VERIFY_KEY) fail("Unauthorized.", 401);
+      if (this.env.PI_TOOL_TRANSPORT !== "lambda") fail("Lambda transport is not configured.", 503);
+      const session = "pi-" + await hash("lambda-fixed-probe");
+      const client = new LambdaMcp(this.fetcher, this.env.LAMBDA_CLIENT_SECRET, session);
+      const result = await client.run("await fs.writeFile('/work/transport-proof.txt','pi-lambda-connected'); console.log(await fs.readFile('/work/transport-proof.txt','utf8'));");
+      if (result.isError || !JSON.stringify(result).includes("pi-lambda-connected")) fail("Lambda transport probe failed.", 502);
+      return Response.json({ transport: "lambda", status: "passed", modelConnected: !!await this.read("chatgpt"), modelVerified: (await this.read("inference-proof-v2"))?.status === "passed" }, { headers: HEADERS });
+    }
     if (path2 === "/ops/verify") {
       if (request.method !== "POST" || !this.env.VERIFY_KEY || request.headers.get("Authorization") !== "Bearer " + this.env.VERIFY_KEY) fail("Unauthorized.", 401);
       return Response.json(await this.verifyInference(), { headers: HEADERS });
@@ -32085,6 +32240,7 @@ var OwnerAuthority = class {
       if (run.status !== "queued") {
         run.status = "interrupted";
         run.reason = "uncertain-checkpoint-no-automatic-replay";
+        await this.releaseLease(run);
         await this.save("run:" + id, run);
         await this.storage.delete("active-run");
         return;
@@ -32096,15 +32252,19 @@ var OwnerAuthority = class {
         const credential = await this.modelCredential();
         const proof = await this.read("inference-proof-v2");
         if (proof?.status !== "passed") throw Error("unverified-model");
-        let turns = 0, completed = 0;
+        let turns = 0, completed = 0, transport;
+        const lambda = this.env.PI_TOOL_TRANSPORT === "lambda";
+        if (this.env.PI_TOOL_TRANSPORT && !["lambda", "modal"].includes(this.env.PI_TOOL_TRANSPORT)) throw Error("invalid-tool-transport");
+        run.transport = lambda ? "lambda" : "modal";
         const model = { id: proof.model, name: proof.model, api: "openai-responses", provider: "openai", baseUrl: "https://api.openai.com/v1", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32e3, maxTokens: 1024 };
         const check = () => {
           if (this.now() > run.deadline) throw Error("deadline");
+          if (run.tools.some((t) => t.status === "intent" || t.status === "uncertain")) throw Error("prior-tool-uncertain-no-replay");
         };
         const tool = {
           name: "run_js",
-          label: "JavaScript in isolated Modal engine",
-          description: "Execute JavaScript in mcp-js. fs.writeFile(path,text), fs.readFile(path), fs.exists(path) are available ONLY below /data/workspace/. Await filesystem calls. console.log results. No Node imports, network or subprocess. Every call recreates a sandbox; files persist, live variables do not.",
+          label: lambda ? "JavaScript in Lambda" : "JavaScript in isolated Modal engine",
+          description: lambda ? "Execute JavaScript in mcp-js on AWS Lambda. Await fs.writeFile, fs.readFile and fs.exists under /work/. Files persist in this session; never rely on live variables. Use console.log for output. No Node imports, network or subprocess." : "Execute JavaScript in mcp-js. fs.writeFile(path,text), fs.readFile(path), fs.exists(path) are available ONLY below /data/workspace/. Await filesystem calls. console.log results. No Node imports, network or subprocess. Tool calls share one sandbox during this run. Files persist; do not rely on JavaScript heap persistence.",
           parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"], additionalProperties: false },
           execute: async (callId, args) => {
             check();
@@ -32113,25 +32273,40 @@ var OwnerAuthority = class {
             const entry = { call, status: "intent" };
             run.tools.push(entry);
             await this.save("run:" + id, run);
-            const response2 = await this.fetcher(this.env.BROKER_URL + "/tool", { method: "POST", redirect: "manual", headers: { Authorization: "Bearer " + this.env.BROKER_KEY, "Content-Type": "application/json" }, body: JSON.stringify({ session: run.session, call, code: args.code }), signal: AbortSignal.timeout(14e4) });
-            if (!response2.ok) {
-              await response2.body?.cancel();
-              entry.status = "uncertain";
-              throw Error("broker-rejected");
+            if (!transport && lambda) {
+              transport = new LambdaMcp(this.fetcher, this.env.LAMBDA_CLIENT_SECRET, "pi-" + await hash(run.session));
+              await transport.initialize();
             }
-            const data = JSON.parse(await limitedText(response2.body, 65536));
-            if (!data.terminated || !data.result) throw Error("invalid-broker-result");
+            if (!transport) {
+              run.lease = { id: await hash("mcp:" + id), status: "intent" };
+              await this.save("run:" + id, run);
+              const lease = await this.lifecycle("acquire", { session: run.session, lease: run.lease.id });
+              if (lease.lease !== run.lease.id) throw Error("lease-mismatch");
+              run.lease.status = "active";
+              run.lease.sandbox = lease.sandbox;
+              await this.save("run:" + id, run);
+              transport = new NativeMcp(this.fetcher, lease);
+              await transport.initialize();
+            }
+            let result;
+            try {
+              result = await transport.run(args.code);
+            } catch {
+              entry.status = "uncertain";
+              await this.save("run:" + id, run);
+              throw Error("direct-mcp-failed-no-replay");
+            }
             entry.status = "completed";
-            entry.sandbox = data.sandbox;
-            entry.terminated = true;
-            entry.isError = !!data.result.isError;
-            entry.result = data.result;
+            entry.transport = run.transport;
+            entry.sandbox = transport.lease.sandbox;
+            entry.isError = !!result.isError;
+            entry.result = result;
             await this.save("run:" + id, run);
-            return { content: [{ type: "text", text: JSON.stringify(data.result) }], details: { sandbox: data.sandbox } };
+            return { content: [{ type: "text", text: JSON.stringify(result) }], details: { sandbox: entry.sandbox } };
           }
         };
         const agent = new Agent({
-          initialState: { model, systemPrompt: "You are the owner personal Pi agent. Use run_js for requested file operations. Report only observed results. Never claim a tool succeeded without checking its output. Files persist but each tool call starts a fresh JS heap.", tools: [tool] },
+          initialState: { model, systemPrompt: lambda ? "You are the owner personal Pi agent. Use run_js for requested file operations under /work/. Report only observed results. Files persist within this session, but live JavaScript variables do not. Never claim success without checking output." : "You are the owner personal Pi agent. Use run_js for requested file operations. Report only observed results. Never claim a tool succeeded without checking its output. Tool calls share a sandbox within this run. Files persist across runs; do not rely on JavaScript heap persistence.", tools: [tool] },
           toolExecution: "sequential",
           streamFn: async (m, c, o) => {
             check();
@@ -32164,11 +32339,38 @@ var OwnerAuthority = class {
         run.status = "failed";
         run.reason = "bounded-run-failed-no-automatic-replay";
       }
+      if (!await this.releaseLease(run)) {
+        run.status = "failed";
+        run.reason = "sandbox-cleanup-unverified";
+      }
       run.finishedAt = this.now();
       await this.save("run:" + id, run);
       await this.storage.delete("active-run");
       await this.storage.deleteAlarm();
     });
+  }
+  async lifecycle(operation, body) {
+    if (!this.env.BROKER_KEY || !this.env.BROKER_URL) throw Error("lifecycle-not-configured");
+    const response2 = await this.fetcher(this.env.BROKER_URL + "/leases/" + operation, { method: "POST", redirect: "manual", headers: { Authorization: "Bearer " + this.env.BROKER_KEY, "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(6e4) });
+    if (!response2.ok) {
+      await response2.body?.cancel();
+      throw Error("lifecycle-failed");
+    }
+    return JSON.parse(await limitedText(response2.body, 8192));
+  }
+  async releaseLease(run) {
+    if (!run.lease) return true;
+    try {
+      const result = await this.lifecycle("release", { lease: run.lease.id });
+      if (result.lease !== run.lease.id || result.terminated !== true) throw Error("release-unverified");
+      run.lease.status = "released";
+      run.lease.terminated = true;
+      for (const entry of run.tools) entry.terminated = true;
+      return true;
+    } catch {
+      run.lease.status = "cleanup-unverified";
+      return false;
+    }
   }
   async verifyInference() {
     const previous = await this.read("inference-proof-v2");
