@@ -11,7 +11,7 @@ test('Lambda uses bounded OAuth, inline execution, stable session and refresh wi
   assert.equal(opts.headers.Authorization,'Bearer test-'+tokens);
   assert.equal(opts.headers['X-MCP-Session-Id'],session);
   const p=JSON.parse(opts.body);assert.equal(p.method,'tools/call');
-  assert.equal(p.params.arguments.wait,true);assert.equal(p.params.arguments.execution_timeout_secs,15);assert.equal(p.params.arguments.fs,session);
+  assert.equal(p.params.arguments.wait,true);assert.equal(p.params.arguments.execution_timeout_secs,15);assert.equal(p.params.arguments.fs,undefined);
   return Response.json({jsonrpc:'2.0',id:p.id,result:{content:[{type:'text',text:'{"status":"completed","output":"42"}'}]}});
  },'test-secret',session,()=>now);
  await client.initialize();await client.run('console.log(42)');await client.run('console.log(43)');assert.equal(tokens,1);
@@ -40,4 +40,22 @@ test('fixed Lambda probe is routed but rejects unauthenticated callers',async()=
  const env={PUBLIC_ORIGIN:origin,AUTH:{idFromName:()=> 'owner',get:()=>authority}};
  const response=await worker.fetch(new Request(origin+'/ops/lambda-probe',{method:'POST'}),env);
  assert.equal(response.status,401);
+});
+
+test('authenticated probe uses the real Worker hash and OAuth transport',async()=>{
+ const {default:worker,OwnerAuthority}=await import('../src/worker.mjs');
+ const origin='https://unit.example';
+ const env={PUBLIC_ORIGIN:origin,VERIFY_KEY:'private',PI_TOOL_TRANSPORT:'lambda',LAMBDA_CLIENT_SECRET:'secret'};
+ const authority=new OwnerAuthority({storage:{}},env);authority.read=async()=>undefined;
+ let requests=0;
+ authority.fetcher=async(url,opts)=>{
+  if(url===TOKEN_ENDPOINT)return Response.json({access_token:'token',token_type:'Bearer',expires_in:300});
+  requests++;assert.equal(url,LAMBDA_ENDPOINT);
+  assert.match(opts.headers['X-MCP-Session-Id'],/^pi-[a-f0-9]{64}$/);
+  const p=JSON.parse(opts.body);assert.equal(p.params.arguments.fs,undefined);
+  return Response.json({jsonrpc:'2.0',id:p.id,result:{content:[{type:'text',text:JSON.stringify({status:'completed',output:'pi-lambda-connected'})}]}});
+ };
+ env.AUTH={idFromName:()=> 'owner',get:()=>authority};
+ const response=await worker.fetch(new Request(origin+'/ops/lambda-probe',{method:'POST',headers:{Authorization:'Bearer private'}}),env);
+ assert.equal(response.status,200);assert.equal((await response.json()).status,'passed');assert.equal(requests,1);
 });

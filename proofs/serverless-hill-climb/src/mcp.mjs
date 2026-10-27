@@ -49,7 +49,7 @@ export class NativeMcp {
     await this.rpc('notifications/initialized',undefined,true);
   }
   async run(code){
-    const result=await this.rpc('tools/call',{name:'run_js',arguments:this.lease.transport==='lambda'?{code,wait:true,execution_timeout_secs:15,fs:this.lease.session}:{code}});
+    const result=await this.rpc('tools/call',{name:'run_js',arguments:this.lease.transport==='lambda'?{code,wait:true,execution_timeout_secs:15}:{code}});
     if(!Array.isArray(result?.content))throw Error('invalid-mcp-tool-result');
     return result;
   }

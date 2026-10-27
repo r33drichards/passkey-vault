@@ -1,3 +1,4 @@
+const transportHash=async value=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
 import { NativeMcp, LambdaMcp } from './mcp.mjs';
 import { githubEvent, githubAlarm } from './github.mjs';
 import { Agent } from '@earendil-works/pi-agent-core';
@@ -157,7 +158,7 @@ export class OwnerAuthority {
     if(path==='/ops/lambda-probe') {
       if(request.method!=='POST' || !this.env.VERIFY_KEY || request.headers.get('Authorization')!=='Bearer '+this.env.VERIFY_KEY) fail('Unauthorized.',401);
       if(this.env.PI_TOOL_TRANSPORT!=='lambda') fail('Lambda transport is not configured.',503);
-      const session='pi-'+await hash('lambda-fixed-probe');
+      const session='pi-'+await transportHash('lambda-fixed-probe');
       const client=new LambdaMcp(this.fetcher,this.env.LAMBDA_CLIENT_SECRET,session);
       const result=await client.run("await fs.writeFile('/work/transport-proof.txt','pi-lambda-connected'); console.log(await fs.readFile('/work/transport-proof.txt','utf8'));");
       if(result.isError || !JSON.stringify(result).includes('pi-lambda-connected')) fail('Lambda transport probe failed.',502);
@@ -341,11 +342,11 @@ export class OwnerAuthority {
           parameters:{type:'object',properties:{code:{type:'string'}},required:['code'],additionalProperties:false},
           execute:async(callId,args)=>{
             check();if(run.tools.length>=4 || typeof args.code!=='string' || args.code.length>8192) throw Error('tool-budget');
-            const call=await hash(id+':'+callId);
+            const call=await transportHash(id+':'+callId);
             const entry={call,status:'intent'};run.tools.push(entry);await this.save('run:'+id,run);
-            if(!transport && lambda){transport=new LambdaMcp(this.fetcher,this.env.LAMBDA_CLIENT_SECRET,'pi-'+await hash(run.session));await transport.initialize();}
+            if(!transport && lambda){transport=new LambdaMcp(this.fetcher,this.env.LAMBDA_CLIENT_SECRET,'pi-'+await transportHash(run.session));await transport.initialize();}
             if(!transport){
-              run.lease={id:await hash('mcp:'+id),status:'intent'};await this.save('run:'+id,run);
+              run.lease={id:await transportHash('mcp:'+id),status:'intent'};await this.save('run:'+id,run);
               const lease=await this.lifecycle('acquire',{session:run.session,lease:run.lease.id});
               if(lease.lease!==run.lease.id)throw Error('lease-mismatch');
               run.lease.status='active';run.lease.sandbox=lease.sandbox;await this.save('run:'+id,run);
