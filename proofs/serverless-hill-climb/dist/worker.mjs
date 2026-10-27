@@ -1272,7 +1272,8 @@ async function importPKCS8(pkcs82, alg, options) {
 // src/github.mjs
 var enc = new TextEncoder();
 var response = (body, status = 200) => Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
-var ACK = "Ack \u2014 received the `hill climb` label. This slice only acknowledges the request; no code changes or hill-climbing have started.\n\n<!-- serverless-hill-climb:ack:v1 -->";
+var triggerLabel = (name) => name === "hill climb" || name === "hillclimb";
+var ACK = "Ack \u2014 received the hill-climb request. This slice only acknowledges the request; no code changes or hill-climbing have started.\n\n<!-- serverless-hill-climb:ack:v1 -->";
 async function validSignature(secret, raw, signature) {
   if (!/^sha256=[a-f0-9]{64}$/.test(signature || "")) return false;
   const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
@@ -1312,7 +1313,7 @@ async function githubEvent(a, r) {
   }
   const event = r.headers.get("X-GitHub-Event");
   if (event === "ping") return response({ status: "pong" });
-  if (event !== "pull_request" || p.action !== "labeled" || p.label?.name !== "hill climb" || p.pull_request?.state !== "open") return response({ status: "ignored" });
+  if (event !== "pull_request" || p.action !== "labeled" || !triggerLabel(p.label?.name) || p.pull_request?.state !== "open") return response({ status: "ignored" });
   const repo = p.repository, number = p.number, installation = p.installation?.id;
   if (String(repo?.owner?.id) !== a.env.GITHUB_OWNER_ID || String(p.pull_request?.base?.repo?.id) !== String(repo?.id)) return response({ error: "owner" }, 403);
   if (!Number.isSafeInteger(repo.id) || !Number.isSafeInteger(number) || number < 1 || !Number.isSafeInteger(installation) || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo.full_name || "")) return response({ error: "payload" }, 400);
@@ -1371,7 +1372,7 @@ async function githubAlarm(a) {
       if (!grant.token) throw Error("installation-token");
       const headers = { Authorization: "Bearer " + grant.token, "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json" };
       const pr = await a.json(`https://api.github.com/repos/${job.repo}/pulls/${job.number}`, { headers });
-      if (pr.state !== "open" || !pr.labels?.some((x) => x.name === "hill climb")) {
+      if (pr.state !== "open" || !pr.labels?.some((x) => triggerLabel(x.name))) {
         job.status = "skipped";
       } else {
         job.status = "posting";
@@ -31913,7 +31914,7 @@ var OwnerAuthority = class {
       if (!app) return this.setupPage();
       if (!s) return page(`<section><h2>Sign in to administer your agent</h2><p>Access is restricted to <strong>${escape2(this.env.GITHUB_OWNER_LOGIN)}</strong>.</p><a class="button" href="/auth/github">Continue with GitHub</a></section>`);
       const recent = await this.read("gh-last");
-      return page(`<p>Signed in as ${escape2(this.env.GITHUB_OWNER_LOGIN)}</p><section><h2>PR acknowledgement agent</h2><p>Install this app on selected repositories in your personal account. Label an open PR <code>hill climb</code>; the app comments once per PR.</p><a class="button" href="https://github.com/apps/${escape2(app.slug)}/installations/new">Install on repositories</a><p>Webhook: <code>/github/events</code></p><p>Slice: fixed acknowledgement only. No model calls, code changes, merges, or Modal allocations.</p><p>Last job: ${escape2(recent ? recent.status + " \xB7 " + recent.repo + "#" + recent.number : "No matching delivery yet")}</p></section>${form(s, "/admin/logout", "Sign out", true)}`);
+      return page(`<p>Signed in as ${escape2(this.env.GITHUB_OWNER_LOGIN)}</p><section><h2>PR acknowledgement agent</h2><p>Install this app on selected repositories in your personal account. Label an open PR <code>hill climb</code> or <code>hillclimb</code>; the app comments once per PR.</p><a class="button" href="https://github.com/apps/${escape2(app.slug)}/installations/new">Install on repositories</a><p>Webhook: <code>/github/events</code></p><p>Slice: fixed acknowledgement only. No model calls, code changes, merges, or Modal allocations.</p><p>Last job: ${escape2(recent ? recent.status + " \xB7 " + recent.repo + "#" + recent.number : "No matching delivery yet")}</p></section>${form(s, "/admin/logout", "Sign out", true)}`);
     }
     if (path2 === "/setup/callback" && request.method === "GET") {
       if (app) fail("GitHub is already configured.", 409);

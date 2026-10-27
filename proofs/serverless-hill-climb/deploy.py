@@ -89,6 +89,7 @@ if status!=200 or ('Set up with GitHub' not in body and 'Continue with GitHub' n
     raise RuntimeError('Admin page is not serving')
 for path,method,expected in [('/admin/chatgpt','GET',401),('/admin/chatgpt/start','POST',401),('/internal/credential','GET',404),('/webhook','POST',401),('/github/events','POST',503),('/setup/callback?state=wrong&code=invalidtestcode','GET',400)]:
     actual,_,_=get(path,method)
+    if path=='/github/events' and actual==401: continue # Configured app rejects unsigned calls.
     # Once setup is complete, setup/callback is permanently disabled.
     if path.startswith('/setup') and actual==409: continue
     if actual!=expected: raise RuntimeError(f'Access check failed: {path} {actual}')
