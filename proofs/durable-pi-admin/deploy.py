@@ -72,7 +72,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*args,**kwargs): return None
 client=urllib.request.build_opener(NoRedirect)
 def get(path,method='GET'):
-    request=urllib.request.Request(origin+path,method=method)
+    request=urllib.request.Request(origin+path,method=method,headers={'User-Agent':'durable-pi-modal-smoke/1.0'})
     try:
         with client.open(request,timeout=20) as response:
             return response.status,response.read().decode(),dict(response.headers)
