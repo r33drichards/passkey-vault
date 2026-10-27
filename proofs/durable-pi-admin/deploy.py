@@ -52,7 +52,9 @@ bindings=[
     {'type':'plain_text','name':'GITHUB_OWNER_LOGIN','text':'r33drichards'},
     {'type':'durable_object_namespace','name':'AUTH','class_name':'OwnerAuthority'},
 ]
-metadata={'main_module':'worker.mjs','compatibility_date':'2026-10-27','bindings':bindings,'observability':{'enabled':False}}
+verify_key=secrets.token_urlsafe(32)
+bindings.append({'type':'secret_text','name':'VERIFY_KEY','text':verify_key})
+metadata={'compatibility_flags':['nodejs_compat'],'main_module':'worker.mjs','compatibility_date':'2026-10-27','bindings':bindings,'observability':{'enabled':False}}
 if exists:
     settings=api(f'/scripts/{NAME}/settings')
     prior={b['name']:b for b in settings.get('bindings',[])}
@@ -96,3 +98,20 @@ summary=f'Admin deployed: {origin}/admin\nOwner ID: {OWNER}\nUnauthenticated Cha
 print(summary)
 if os.environ.get('GITHUB_STEP_SUMMARY'):
     with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f: f.write(summary)
+
+# A temporary capability enables only the fixed one-shot diagnostic. Remove it
+# even when verification fails. No token or raw provider response enters CI logs.
+try:
+    request=urllib.request.Request(origin+'/ops/verify',method='POST',headers={
+        'User-Agent':'durable-pi-modal-smoke/1.0','Authorization':'Bearer '+verify_key})
+    try:
+        with client.open(request,timeout=90) as response:
+            proof=json.load(response)
+    except urllib.error.HTTPError as error:
+        proof={'status':'blocked','phase':'verification-route','httpStatus':error.code}
+    print('INFERENCE_PROOF '+json.dumps(proof))
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:
+            f.write('\nServer-side Pi verification: `'+json.dumps(proof)+'`\n')
+finally:
+    api(f'/scripts/{NAME}/secrets/VERIFY_KEY','DELETE')
