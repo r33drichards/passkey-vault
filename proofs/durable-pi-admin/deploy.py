@@ -52,6 +52,9 @@ bindings=[
     {'type':'plain_text','name':'GITHUB_OWNER_LOGIN','text':'r33drichards'},
     {'type':'durable_object_namespace','name':'AUTH','class_name':'OwnerAuthority'},
 ]
+bindings.extend([{'type':'plain_text','name':'BROKER_URL','text':'https://r33drichards--durable-pi-modal-broker-service.us-east.modal.run'},
+    {'type':'secret_text','name':'BROKER_KEY','text':os.environ['BROKER_KEY']},
+    {'type':'secret_text','name':'WEBHOOK_KEY','text':os.environ['WEBHOOK_KEY']}])
 verify_key=secrets.token_urlsafe(32)
 bindings.append({'type':'secret_text','name':'VERIFY_KEY','text':verify_key})
 metadata={'compatibility_flags':['nodejs_compat'],'main_module':'worker.mjs','compatibility_date':'2026-10-27','bindings':bindings,'observability':{'enabled':False}}
@@ -89,7 +92,7 @@ else: raise RuntimeError('Deployed health check failed')
 status,body,headers=get('/admin')
 if status!=200 or ('Set up with GitHub' not in body and 'Continue with GitHub' not in body):
     raise RuntimeError('Admin page is not serving')
-for path,method,expected in [('/admin/chatgpt','GET',401),('/admin/chatgpt/start','POST',401),('/internal/credential','GET',404),('/webhook','POST',404),('/setup/callback?state=wrong&code=invalidtestcode','GET',400)]:
+for path,method,expected in [('/admin/chatgpt','GET',401),('/admin/chatgpt/start','POST',401),('/internal/credential','GET',404),('/webhook','POST',401),('/setup/callback?state=wrong&code=invalidtestcode','GET',400)]:
     actual,_,_=get(path,method)
     # Once setup is complete, setup/callback is permanently disabled.
     if path.startswith('/setup') and actual==409: continue

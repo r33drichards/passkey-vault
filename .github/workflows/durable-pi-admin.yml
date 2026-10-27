@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Deploy isolated owner-only admin and verify access controls
         env:
+          BROKER_KEY: ${{ secrets.DURABLE_PI_BROKER_KEY }}
+          WEBHOOK_KEY: ${{ secrets.DURABLE_PI_WEBHOOK_KEY }}
           CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CF_ACCOUNT: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: python3 proofs/durable-pi-admin/deploy.py

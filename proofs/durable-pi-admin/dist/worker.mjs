@@ -31300,6 +31300,8 @@ async function limitedText(body, limit2) {
   return dec.decode(all);
 }
 var ROUTES = /* @__PURE__ */ new Set([
+  "/webhook",
+  "/runs",
   "/admin",
   "/setup/callback",
   "/auth/github",
@@ -31315,7 +31317,7 @@ var worker_default = {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.origin !== env.PUBLIC_ORIGIN) return new Response("Wrong host", { status: 421, headers: HEADERS });
-    if (url.pathname === "/health" && request.method === "GET") return Response.json({ service: "durable-pi-modal", admin: "deployed", webhook: "not-enabled" }, { headers: HEADERS });
+    if (url.pathname === "/health" && request.method === "GET") return Response.json({ service: "durable-pi-modal", admin: "deployed", webhook: "checkpointed" }, { headers: HEADERS });
     if (url.pathname === "/") return redirect("/admin");
     if (!ROUTES.has(url.pathname)) return new Response("Not found", { status: 404, headers: HEADERS });
     return env.AUTH.get(env.AUTH.idFromName("owner")).fetch(request);
@@ -31426,6 +31428,7 @@ var OwnerAuthority = class {
   async route(request) {
     const url = new URL(request.url), path2 = url.pathname, origin = this.env.PUBLIC_ORIGIN;
     if (url.origin !== origin) fail("Wrong host.", 421);
+    if (path2 === "/webhook" || path2 === "/runs") return this.webhook(request);
     if (path2 === "/ops/verify") {
       if (request.method !== "POST" || !this.env.VERIFY_KEY || request.headers.get("Authorization") !== "Bearer " + this.env.VERIFY_KEY) fail("Unauthorized.", 401);
       return Response.json(await this.verifyInference(), { headers: HEADERS });
@@ -31437,7 +31440,7 @@ var OwnerAuthority = class {
       if (!s) return page(`<section><h2>Sign in to administer your agent</h2><p>Access is restricted to <strong>${escape2(this.env.GITHUB_OWNER_LOGIN)}</strong>.</p><a class="button" href="/auth/github">Continue with GitHub</a></section>`);
       const model = await this.read("chatgpt");
       const connected = model?.status === "ready";
-      return page(`<p class="muted">Signed in as ${escape2(this.env.GITHUB_OWNER_LOGIN)}</p><section><h2>ChatGPT connection</h2><p>${connected ? "Connected. Your credentials are saved encrypted for the agent." : model ? "Reconnect required. No automatic model requests will be made." : "Not connected yet."}</p>${connected ? `<p class="muted">Account: ${escape2(model.identity.email || model.identity.sub)}</p>` : ""}${form(s, "/admin/chatgpt/start", connected ? "Reconnect ChatGPT" : "Connect ChatGPT")}${model ? form(s, "/admin/chatgpt/disconnect", "Disconnect locally", true) : ""}</section><section><h2>Webhook agent</h2><p>Not enabled yet. This page completes secure account setup; the full Pi \u2192 Modal run is still being integrated.</p></section>${form(s, "/admin/logout", "Sign out of admin", true)}`);
+      return page(`<p class="muted">Signed in as ${escape2(this.env.GITHUB_OWNER_LOGIN)}</p><section><h2>ChatGPT connection</h2><p>${connected ? "Connected. Your credentials are saved encrypted for the agent." : model ? "Reconnect required. No automatic model requests will be made." : "Not connected yet."}</p>${connected ? `<p class="muted">Account: ${escape2(model.identity.email || model.identity.sub)}</p>` : ""}${form(s, "/admin/chatgpt/start", connected ? "Reconnect ChatGPT" : "Connect ChatGPT")}${model ? form(s, "/admin/chatgpt/disconnect", "Disconnect locally", true) : ""}</section><section><h2>Webhook agent</h2><p>Authenticated endpoint: <code>/webhook</code>. Runs are checkpointed; model and tool calls are bounded. A reported connection alone is not proof of a completed run.</p></section>${form(s, "/admin/logout", "Sign out of admin", true)}`);
     }
     if (path2 === "/setup/callback" && request.method === "GET") {
       if (app) fail("GitHub is already configured.", 409);
@@ -31554,6 +31557,143 @@ var OwnerAuthority = class {
     } catch {
       fail("ChatGPT identity validation failed. No credentials were saved.", 403);
     }
+  }
+  async webhook(request) {
+    if (!this.env.WEBHOOK_KEY || request.headers.get("Authorization") !== "Bearer " + this.env.WEBHOOK_KEY) fail("Unauthorized.", 401);
+    const url = new URL(request.url);
+    if (url.pathname === "/runs" && request.method === "GET") {
+      const id2 = url.searchParams.get("id");
+      if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id2 || "")) fail("Invalid event ID.");
+      const run2 = await this.read("run:" + id2);
+      if (!run2) fail("Not found.", 404);
+      return Response.json(run2, { headers: HEADERS });
+    }
+    if (url.pathname !== "/webhook" || request.method !== "POST") fail("Method not allowed.", 405);
+    let body;
+    try {
+      body = JSON.parse(await limitedText(request.body, 12e3));
+    } catch {
+      fail("Invalid body.");
+    }
+    const { id, session, prompt, timestamp } = body || {};
+    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id || "") || !/^[a-z0-9-]{1,64}$/.test(session || "") || typeof prompt !== "string" || prompt.length > 4e3 || !Number.isFinite(timestamp) || Math.abs(this.now() - timestamp) > 3e5) fail("Invalid event or expired timestamp.");
+    const digest = await hash(JSON.stringify({ session, prompt }));
+    const prior = await this.read("run:" + id);
+    if (prior) {
+      if (prior.digest !== digest) fail("Event ID conflict.", 409);
+      if (prior.status === "queued") await this.storage.setAlarm(this.now() + 100);
+      return Response.json({ id, status: prior.status, duplicate: true }, { headers: HEADERS });
+    }
+    if (await this.storage.get("active-run")) fail("An owner run is already active.", 409);
+    const count = await this.storage.get("run-count") || 0;
+    if (count >= 100) fail("Run retention cap reached.", 429);
+    const run = { id, session, prompt, digest, status: "queued", createdAt: this.now(), deadline: this.now() + 24e4, tools: [] };
+    await this.save("run:" + id, run);
+    await this.storage.put("run-count", count + 1);
+    await this.storage.put("active-run", id);
+    await this.storage.setAlarm(this.now() + 100);
+    return Response.json({ id, status: "queued", duplicate: false }, { status: 202, headers: HEADERS });
+  }
+  alarm() {
+    return this.serial(async () => {
+      const id = await this.storage.get("active-run");
+      if (!id) return;
+      const run = await this.read("run:" + id);
+      if (!run) {
+        await this.storage.delete("active-run");
+        return;
+      }
+      if (["completed", "failed", "interrupted"].includes(run.status)) {
+        await this.storage.delete("active-run");
+        return;
+      }
+      if (run.status !== "queued") {
+        run.status = "interrupted";
+        run.reason = "uncertain-checkpoint-no-automatic-replay";
+        await this.save("run:" + id, run);
+        await this.storage.delete("active-run");
+        return;
+      }
+      run.status = "running";
+      await this.save("run:" + id, run);
+      await this.storage.setAlarm(run.deadline + 1e3);
+      try {
+        const credential = await this.modelCredential();
+        const proof = await this.read("inference-proof-v2");
+        if (proof?.status !== "passed") throw Error("unverified-model");
+        let turns = 0, completed = 0;
+        const model = { id: proof.model, name: proof.model, api: "openai-responses", provider: "openai", baseUrl: "https://api.openai.com/v1", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32e3, maxTokens: 1024 };
+        const check = () => {
+          if (this.now() > run.deadline) throw Error("deadline");
+        };
+        const tool = {
+          name: "run_js",
+          label: "JavaScript in isolated Modal engine",
+          description: "Execute JavaScript in mcp-js. fs.writeFile(path,text), fs.readFile(path), fs.exists(path) are available ONLY below /data/workspace/. Await filesystem calls. console.log results. No Node imports, network or subprocess. Every call recreates a sandbox; files persist, live variables do not.",
+          parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"], additionalProperties: false },
+          execute: async (callId, args) => {
+            check();
+            if (run.tools.length >= 4 || typeof args.code !== "string" || args.code.length > 8192) throw Error("tool-budget");
+            const call = await hash(id + ":" + callId);
+            const entry = { call, status: "intent" };
+            run.tools.push(entry);
+            await this.save("run:" + id, run);
+            const response = await this.fetcher(this.env.BROKER_URL + "/tool", { method: "POST", redirect: "manual", headers: { Authorization: "Bearer " + this.env.BROKER_KEY, "Content-Type": "application/json" }, body: JSON.stringify({ session: run.session, call, code: args.code }), signal: AbortSignal.timeout(14e4) });
+            if (!response.ok) {
+              await response.body?.cancel();
+              entry.status = "uncertain";
+              throw Error("broker-rejected");
+            }
+            const data = JSON.parse(await limitedText(response.body, 65536));
+            if (!data.terminated || !data.result) throw Error("invalid-broker-result");
+            entry.status = "completed";
+            entry.sandbox = data.sandbox;
+            entry.terminated = true;
+            entry.isError = !!data.result.isError;
+            entry.result = data.result;
+            await this.save("run:" + id, run);
+            return { content: [{ type: "text", text: JSON.stringify(data.result) }], details: { sandbox: data.sandbox } };
+          }
+        };
+        const agent = new Agent({
+          initialState: { model, systemPrompt: "You are the owner personal Pi agent. Use run_js for requested file operations. Report only observed results. Never claim a tool succeeded without checking its output. Files persist but each tool call starts a fresh JS heap.", tools: [tool] },
+          toolExecution: "sequential",
+          streamFn: async (m, c, o) => {
+            check();
+            if (++turns > 4) throw Error("turn-budget");
+            run.phase = "model";
+            run.turns = turns;
+            await this.save("run:" + id, run);
+            return stream(m, c, {
+              ...o,
+              apiKey: credential.access,
+              maxTokens: 1024,
+              maxRetries: 0,
+              signal: AbortSignal.timeout(45e3),
+              fetch: (u, opts) => this.fetcher(u, { ...opts, redirect: "manual" }),
+              onPayload: (p) => ({ ...p, store: false, stream: true }),
+              onProviderStreamEvent: (e) => {
+                if (e.type === "response.completed") completed++;
+              }
+            });
+          }
+        });
+        await agent.prompt(run.prompt);
+        const last = agent.state.messages.filter((m) => m.role === "assistant").at(-1);
+        run.transcript = agent.state.messages;
+        for (const msg of run.transcript) if (msg.errorMessage) msg.errorMessage = "provider-request-failed";
+        run.output = (last?.content || []).filter((c) => c.type === "text").map((c) => c.text).join("").slice(0, 8192);
+        run.status = completed === turns && last?.stopReason === "stop" && run.tools.every((t) => t.status === "completed" && !t.isError) ? "completed" : "failed";
+        run.completedModelResponses = completed;
+      } catch {
+        run.status = "failed";
+        run.reason = "bounded-run-failed-no-automatic-replay";
+      }
+      run.finishedAt = this.now();
+      await this.save("run:" + id, run);
+      await this.storage.delete("active-run");
+      await this.storage.deleteAlarm();
+    });
   }
   async verifyInference() {
     const previous = await this.read("inference-proof-v2");
