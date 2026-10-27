@@ -763,7 +763,7 @@ var OwnerAuthority = class {
     return s;
   }
   async json(url, options = {}) {
-    const response = await this.fetcher(url, { ...options, redirect: "error", signal: AbortSignal.timeout(15e3), headers: { Accept: "application/json", "User-Agent": "durable-pi-modal", ...options.headers } });
+    const response = await this.fetcher(url, { ...options, redirect: "manual", signal: AbortSignal.timeout(15e3), headers: { Accept: "application/json", "User-Agent": "durable-pi-modal", ...options.headers } });
     if (!response.ok) {
       await response.body?.cancel();
       fail("The sign-in provider could not complete this request. Start a fresh sign-in.", 502);
